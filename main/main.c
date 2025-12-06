@@ -49,7 +49,7 @@
 
 static EventGroupHandle_t s_wifi_event_group;
 
-#define OTA_URL "https://github.com/stuppmarcelo/smart-water/releases/latest/download/firmware.bin"
+#define OTA_URL "https://github.com/stuppmarcelo/smart-water/releases/latest/download/smart-water.bin"
 
 extern const unsigned char _binary_fullchain_pem_start[] asm("_binary_fullchain_pem_start");
 extern const unsigned char _binary_fullchain_pem_end[]   asm("_binary_fullchain_pem_end");
