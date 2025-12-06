@@ -34,15 +34,15 @@
 #define TIME_ADC_INTERVAL 50
 #define MAX_TIMER_ON 300000
 
-#define BETA 3950.0
-#define REF_TEMP 298.15
-#define REF_RESISTANCE 10000.0
-#define SERIE_RESISTOR 10000.0
-#define FACTORADC 0.01
+#define BETA 3950.0f
+#define REF_TEMP 298.15f
+#define REF_RESISTANCE 10000.0f
+#define SERIE_RESISTOR 10000.0f
+#define FACTORADC 0.01f
 
-#define KP 20.00
-#define KI 0.01
-#define KD 100.00
+#define KP 20.00f
+#define KI 0.01f
+#define KD 100.00f
 
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT      BIT1
@@ -210,8 +210,8 @@ void logic_control(void) {
     float d = 0.0f;
 
     i += p * KI;
-    if (i > 255.00) i = 255.00f;
-    else if (i < 0.00) i = 0.00f;
+    if (i > 255.00f) i = 255.00f;
+    else if (i < 0.00f) i = 0.00f;
 
     d = (er - oldEr) * KD;
 
@@ -274,7 +274,7 @@ void temperature_task(void *arg) {
         int adcVal = analogRead_adc1();
         float voltage = (float)adcVal / 1000.0f;
 
-        if (voltage <= 0.2 || voltage >= 3.1) {
+        if (voltage <= 0.2f || voltage >= 3.1f) {
             heatError = true;
             waterTemp = 199.00f;
             ESP_LOGE(TAG_TEMP, "Temp Sensor Error! Voltage:%f", voltage);
@@ -282,10 +282,10 @@ void temperature_task(void *arg) {
         }
 
         float ntcResistance = (3.3f * SERIE_RESISTOR / voltage) - SERIE_RESISTOR;
-        float kTemperature = 1.0 / (1.0 / REF_TEMP + (1.0 / BETA) * log(ntcResistance / REF_RESISTANCE));
+        float kTemperature = 1.0f / (1.0f / REF_TEMP + (1.0f / BETA) * log(ntcResistance / REF_RESISTANCE));
         float currentTemperature = kTemperature - 273.15f;
 
-        temp = (1.0 - FACTORADC) * temp + FACTORADC * currentTemperature;
+        temp = (1.0f - FACTORADC) * temp + FACTORADC * currentTemperature;
 
         waterTemp = temp;
 
