@@ -2,6 +2,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
+#include "esp_task_wdt.h"
 
 #include "driver/gpio.h"
 #include "driver/gptimer.h"
@@ -142,6 +143,7 @@ esp_err_t perform_ota_update(void)
     while ((err = esp_https_ota_perform(https_ota_handle)) == ESP_ERR_HTTPS_OTA_IN_PROGRESS) {
         int bytes_downloaded = esp_https_ota_get_image_len_read(https_ota_handle);
         ESP_LOGI(TAG_OTA, "Downloaded %d bytes...", bytes_downloaded);
+        esp_task_wdt_reset();
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 
@@ -258,16 +260,21 @@ void power_control(void) {
 
 void control_task(void *arg) {
 
+    esp_task_wdt_add(NULL);
+
     while (1) {
         logic_control();
         power_control();
         
+        esp_task_wdt_reset();
         vTaskDelay(pdMS_TO_TICKS(TIME_CONTROL_INTERVAL));
     }
 }
 
 void temperature_task(void *arg) {
     static float temp = 25.00f;
+
+    esp_task_wdt_add(NULL);
 
     while(1) {
 
@@ -293,12 +300,16 @@ void temperature_task(void *arg) {
             heatError = true;
             ESP_LOGW(TAG_TEMP, "Overtemp! %f", waterTemp);
         }
+
+        esp_task_wdt_reset();
         vTaskDelay(pdMS_TO_TICKS(TIME_ADC_INTERVAL));
     }
 
 }
 
 void aux_task(void *arg) {
+
+    esp_task_wdt_add(NULL);
 
     while(1) {
        if (commandBtn) {
@@ -319,6 +330,7 @@ void aux_task(void *arg) {
             esp_deep_sleep_start();         // Falls on deep sleep with no return 
         }
 
+        esp_task_wdt_reset();
         vTaskDelay(pdMS_TO_TICKS(1));
     }
 }
@@ -429,7 +441,7 @@ void app_main(void) {
     // Start loop task
     xTaskCreate(control_task, "control", 4096, NULL, 2, NULL);
     xTaskCreate(temperature_task, "temperature", 4096, NULL, 1, NULL);
-    xTaskCreate(aux_task, "auxiliar", 4096, NULL, 5, NULL);
+    xTaskCreatePinnedToCore(aux_task, "auxiliar", 4096, NULL, 5, NULL, 1);
 
     wifi_init_sta();
 
