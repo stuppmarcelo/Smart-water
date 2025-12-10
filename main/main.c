@@ -17,6 +17,10 @@
 
 #include "esp_wifi.h"
 #include "esp_netif.h"
+#include "nvs.h"
+#include "nvs_flash.h"
+#include "esp_sntp.h"
+#include "time.h"
 
 #include "esp_https_ota.h"
 #include "esp_http_client.h"
@@ -25,6 +29,7 @@
 
 #include "math.h"
 
+#include "esp_crt_bundle.h"
 
 #define OUT_POWER GPIO_NUM_19
 #define IN_ZERO_CROSSING GPIO_NUM_18
@@ -41,19 +46,17 @@
 #define SERIE_RESISTOR 10000.0f
 #define FACTORADC 0.01f
 
-#define KP 20.00f
-#define KI 0.01f
-#define KD 100.00f
+#define KP 5.00f
+#define KI 0.008f
+#define KD 200.00f
 
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT      BIT1
 
 static EventGroupHandle_t s_wifi_event_group;
 
-#define OTA_URL "https://github.com/stuppmarcelo/Smart-water/releases/latest/download/Smart-water.bin"
+#define OTA_URL "https://github.com/stuppmarcelo/Smart-water/releases/download/latest/Smart-water.bin"
 
-extern const unsigned char _binary_fullchain_pem_start[] asm("_binary_fullchain_pem_start");
-extern const unsigned char _binary_fullchain_pem_end[]   asm("_binary_fullchain_pem_end");
 
 static int s_retry_num = 0;
 
@@ -96,21 +99,28 @@ void gpio_setup(void);
 void wifi_init_sta(void);
 void adc_init(void);
 
+
 esp_err_t perform_ota_update(void)
 {
     ESP_LOGI(TAG_OTA, "Starting OTA update...");
 
-    esp_http_client_config_t config = {
-        .url = OTA_URL,
-        .timeout_ms = 5000,
-        .keep_alive_enable = true,
-        .cert_pem = (char *)_binary_fullchain_pem_start,
-    };
-
     esp_https_ota_config_t ota_config = {
-        .http_config = &config,
+        .http_config = &(esp_http_client_config_t) {
+            .url = OTA_URL,
+            .crt_bundle_attach = esp_crt_bundle_attach,
+            .skip_cert_common_name_check = true,
+        },
     };
 
+    esp_err_t ret = esp_https_ota(&ota_config);
+
+    if (ret == ESP_OK) {
+        ESP_LOGI("OTA", "OTA success, restarting...");
+        esp_restart();
+    } else {
+        ESP_LOGE("OTA", "OTA failed: %s", esp_err_to_name(ret));
+    }
+/*
     esp_https_ota_handle_t https_ota_handle = NULL;
     esp_err_t err = esp_https_ota_begin(&ota_config, &https_ota_handle);
     if (err != ESP_OK) {
@@ -130,7 +140,7 @@ esp_err_t perform_ota_update(void)
     ESP_LOGI(TAG_OTA, "Running version: %s", running_desc->version);
     ESP_LOGI(TAG_OTA, "New image  version: %s", new_app_info.version);
 
-    /* If versions match, abort and return ESP_OK (no update needed) */
+
     if (memcmp(new_app_info.version, running_desc->version, sizeof(new_app_info.version)) == 0) {
         ESP_LOGI(TAG_OTA, "No new firmware. Versions match.");
         esp_https_ota_abort(https_ota_handle);
@@ -139,7 +149,6 @@ esp_err_t perform_ota_update(void)
 
     ESP_LOGI(TAG_OTA, "New firmware available, starting download/flash...");
 
-    /* Perform download/flash loop */
     while ((err = esp_https_ota_perform(https_ota_handle)) == ESP_ERR_HTTPS_OTA_IN_PROGRESS) {
         int bytes_downloaded = esp_https_ota_get_image_len_read(https_ota_handle);
         ESP_LOGI(TAG_OTA, "Downloaded %d bytes...", bytes_downloaded);
@@ -153,7 +162,6 @@ esp_err_t perform_ota_update(void)
         return err;
     }
 
-    /* finish and validate the image */
     err = esp_https_ota_finish(https_ota_handle);
     if (err == ESP_OK) {
         ESP_LOGI(TAG_OTA, "OTA finished successfully, rebooting...");
@@ -164,7 +172,7 @@ esp_err_t perform_ota_update(void)
         return err;
     }
 
-    /* should not reach here, but return error if we do */
+    */
     return ESP_FAIL;
 }
 
@@ -174,7 +182,7 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t e
         esp_wifi_connect();
     } 
     else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        if (s_retry_num < 10) {
+        if (s_retry_num < 4) {
             esp_wifi_connect();
             s_retry_num++;
             ESP_LOGI(TAGWIFI, "Retrying connection...");
@@ -195,7 +203,7 @@ int analogRead_adc1(void) {
     int raw = 0;
     ESP_ERROR_CHECK(adc_oneshot_read(adc_handle, NTC_PIN, &raw));
 
-    if (adc_calibrated) {
+    if (adc_calibrated && adc_cali_handle != NULL) {
         int voltage_mv = 0;
         ESP_ERROR_CHECK(adc_cali_raw_to_voltage(adc_cali_handle, raw, &voltage_mv));
         return voltage_mv;  // you can decide if you want raw or mV
@@ -211,7 +219,7 @@ void logic_control(void) {
     static float i = 0.0f;
     float d = 0.0f;
 
-    i += p * KI;
+    i += er * KI;
     if (i > 255.00f) i = 255.00f;
     else if (i < 0.00f) i = 0.00f;
 
@@ -229,9 +237,10 @@ void logic_control(void) {
             commandBtn = !gpio_get_level(IN_BTN);
         } else {
             commandBtn = false;
+            i = 0.0f;
         }
 
-        if (lastTimeBtn > 100 && lastTimeBtn < 1000 && commandBtn) {
+        if (lastTimeBtn > 10 && lastTimeBtn < 100 && commandBtn) {
             setpoint = 120.0f;
             lastTimeBtn = 0;
         }
@@ -309,8 +318,6 @@ void temperature_task(void *arg) {
 
 void aux_task(void *arg) {
 
-    esp_task_wdt_add(NULL);
-
     while(1) {
        if (commandBtn) {
             timerBtn++;         // Not precise timer but enghout for it
@@ -319,19 +326,18 @@ void aux_task(void *arg) {
             if (timerBtn) {
                 lastTimeBtn = timerBtn;
                 timerBtn = 0;
+                ESP_LOGI(TAG_BTN, "Button was released");
+                ESP_LOGI(TAG_BTN, "Last time btn: %d", lastTimeBtn);
             }
         }
         
 
         if ((esp_timer_get_time() / 1000) > MAX_TIMER_ON) {
-            adc_cali_delete_scheme_line_fitting(adc_cali_handle);
             gpio_set_level(OUT_POWER, 0);
             perform_ota_update();
             esp_deep_sleep_start();         // Falls on deep sleep with no return 
         }
-
-        esp_task_wdt_reset();
-        vTaskDelay(pdMS_TO_TICKS(1));
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
 }
 
@@ -356,23 +362,27 @@ void wifi_init_sta(void)
     esp_wifi_init(&cfg);
 
     // Register handlers
-    esp_event_handler_instance_register(WIFI_EVENT,
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT,
                                         ESP_EVENT_ANY_ID,
                                         &wifi_event_handler,
                                         NULL,
-                                        NULL);
-    esp_event_handler_instance_register(IP_EVENT,
+                                        NULL));
+    ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT,
                                         IP_EVENT_STA_GOT_IP,
                                         &wifi_event_handler,
                                         NULL,
-                                        NULL);
+                                        NULL));
 
     wifi_config_t wifi_config = {
         .sta = {
             .ssid = SSID,
             .password = PASSWORD,
-            .threshold.authmode = WIFI_AUTH_WPA2_PSK
-        }
+            .threshold.authmode = WIFI_AUTH_WPA2_PSK,
+            .pmf_cfg = {
+                .capable = true,
+                .required = false
+            },
+        },
     };
 
     esp_wifi_set_mode(WIFI_MODE_STA);
@@ -396,6 +406,41 @@ void wifi_init_sta(void)
     } else {
         ESP_LOGE(TAGWIFI, "Unexpected event");
     }
+}
+
+void sync_time(void) {
+    // Configure SNTP
+    sntp_setoperatingmode(SNTP_OPMODE_POLL);
+    sntp_setservername(0, "pool.ntp.org");    
+    sntp_init();
+
+    time_t now = 0;
+    struct tm timeinfo = {0};
+
+    // Wait until time is set
+    int retry = 0;
+    const int retry_count = 10;
+    while (timeinfo.tm_year < (2016 - 1900) && ++retry < retry_count)
+    {
+        vTaskDelay(2000 / portTICK_PERIOD_MS);
+        time(&now);
+        localtime_r(&now, &timeinfo);
+    }
+
+    if (timeinfo.tm_year >= (2016 - 1900))
+    {
+        ESP_LOGI("Time", "Time synced: %s", asctime(&timeinfo));
+    }
+    else
+    {
+        ESP_LOGW("Time", "Failed to sync NTP time\n");
+    }
+
+    setenv("TZ", "GMT+3", 1);
+    tzset();
+
+    localtime_r(&now, &timeinfo);
+    ESP_LOGI("Time", "Local time (Brazil): %s", asctime(&timeinfo));
 }
 
 void adc_init(void)
@@ -441,9 +486,17 @@ void app_main(void) {
     // Start loop task
     xTaskCreate(control_task, "control", 4096, NULL, 2, NULL);
     xTaskCreate(temperature_task, "temperature", 4096, NULL, 1, NULL);
-    xTaskCreatePinnedToCore(aux_task, "auxiliar", 4096, NULL, 5, NULL, 1);
+    xTaskCreatePinnedToCore(aux_task, "auxiliar", 4096, NULL, 5, NULL, 1);  
+
+
+    // NVS init
+    ESP_ERROR_CHECK(nvs_flash_init());
+
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
 
     wifi_init_sta();
-
     ESP_LOGI(TAGWIFI, "Wifi Ready!");
+
+    sync_time();
 }

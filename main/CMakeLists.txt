@@ -4,5 +4,5 @@ idf_component_register(
 )
 
 # Embed certificate into binary
-set(CERT_FILE "certs/fullchain.pem")
+set(CERT_FILE "certs/root_ca.pem")
 target_add_binary_data(${COMPONENT_TARGET} ${CERT_FILE} TEXT)
