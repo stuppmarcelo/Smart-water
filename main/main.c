@@ -38,7 +38,7 @@
 
 #define TIME_CONTROL_INTERVAL 50
 #define TIME_ADC_INTERVAL 50
-#define MAX_TIMER_ON 300000
+#define MAX_TIMER_ON 30000
 
 #define BETA 3950.0f
 #define REF_TEMP 298.15f
@@ -47,7 +47,7 @@
 #define FACTORADC 0.01f
 
 #define KP 5.00f
-#define KI 0.008f
+#define KI 0.0008f
 #define KD 200.00f
 
 #define WIFI_CONNECTED_BIT BIT0
@@ -55,7 +55,8 @@
 
 static EventGroupHandle_t s_wifi_event_group;
 
-#define OTA_URL "https://github.com/stuppmarcelo/Smart-water/releases/download/latest/Smart-water.bin"
+#define OTA_URL "https://raw.githubusercontent.com/stuppmarcelo/Smart-water/main/firmware/Smart-water.bin"
+
 
 
 static int s_retry_num = 0;
@@ -102,6 +103,10 @@ void adc_init(void);
 
 esp_err_t perform_ota_update(void)
 {
+    esp_log_level_set("esp_http_client", ESP_LOG_VERBOSE);
+    esp_log_level_set("OTA", ESP_LOG_VERBOSE);
+    esp_log_level_set("esp-tls", ESP_LOG_INFO);
+
     ESP_LOGI(TAG_OTA, "Starting OTA update...");
 
     esp_https_ota_config_t ota_config = {
@@ -109,7 +114,9 @@ esp_err_t perform_ota_update(void)
             .url = OTA_URL,
             .crt_bundle_attach = esp_crt_bundle_attach,
             .skip_cert_common_name_check = true,
+            .keep_alive_enable = true,
         },
+        .partial_http_download = true,
     };
 
     esp_err_t ret = esp_https_ota(&ota_config);
