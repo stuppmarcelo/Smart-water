@@ -175,6 +175,7 @@ esp_err_t perform_ota_update(void) {
     } 
     else {
         ESP_LOGE("OTA", "OTA failed");
+        esp_deep_sleep();
     }
 
     return ESP_FAIL;
