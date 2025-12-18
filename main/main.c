@@ -31,14 +31,14 @@
 
 #include "esp_crt_bundle.h"
 
-#define OUT_POWER GPIO_NUM_19
+#define OUT_POWER GPIO_NUM_2
 #define IN_ZERO_CROSSING GPIO_NUM_18
 #define IN_BTN GPIO_NUM_21
 #define NTC_PIN ADC_CHANNEL_6
 
 #define TIME_CONTROL_INTERVAL 50
 #define TIME_ADC_INTERVAL 50
-#define MAX_TIMER_ON 30000
+#define MAX_TIMER_ON 300000
 
 #define BETA 3950.0f
 #define REF_TEMP 298.15f
@@ -55,7 +55,7 @@
 
 static EventGroupHandle_t s_wifi_event_group;
 
-#define OTA_URL "https://raw.githubusercontent.com/stuppmarcelo/Smart-water/main/firmware/Smart-water.bin"
+#define OTA_URL "http://192.168.68.52:8000/Smart-water.bin"    
 
 
 
@@ -100,12 +100,53 @@ void gpio_setup(void);
 void wifi_init_sta(void);
 void adc_init(void);
 
+/**
+ * How to run OTA
+ * 
+ * 1 - Build your code with the correct IP server
+ * 2 - Save the project.bin file from build to a different path
+ * 3 - Open the terminal and run cd /your/path/here/
+ * 4 - Run on terminal python3 -m http.server 8000
+ * 5 - Run ESP OTA program 
+ */
 
-esp_err_t perform_ota_update(void)
+esp_err_t _http_event_handler(esp_http_client_event_t *evt)
 {
-    esp_log_level_set("esp_http_client", ESP_LOG_VERBOSE);
-    esp_log_level_set("OTA", ESP_LOG_VERBOSE);
-    esp_log_level_set("esp-tls", ESP_LOG_INFO);
+    switch (evt->event_id) {
+    case HTTP_EVENT_ERROR:
+        ESP_LOGI(TAG_OTA, "HTTP_EVENT_ERROR");
+        break;
+    case HTTP_EVENT_ON_CONNECTED:
+        ESP_LOGI(TAG_OTA, "HTTP_EVENT_ON_CONNECTED");
+        break;
+    case HTTP_EVENT_HEADER_SENT:
+        ESP_LOGI(TAG_OTA, "HTTP_EVENT_HEADER_SENT");
+        break;
+    case HTTP_EVENT_ON_HEADER:
+        ESP_LOGI(TAG_OTA, "HTTP_EVENT_ON_HEADER, key=%s, value=%s", evt->header_key, evt->header_value);
+        break;
+    case HTTP_EVENT_ON_DATA:
+        ESP_LOGI(TAG_OTA, "HTTP_EVENT_ON_DATA, len=%d", evt->data_len);
+        break;
+    case HTTP_EVENT_ON_FINISH:
+        ESP_LOGI(TAG_OTA, "HTTP_EVENT_ON_FINISH");
+        break;
+    case HTTP_EVENT_DISCONNECTED:
+        ESP_LOGI(TAG_OTA, "HTTP_EVENT_DISCONNECTED");
+        break;
+    case HTTP_EVENT_REDIRECT:
+        ESP_LOGI(TAG_OTA, "HTTP_EVENT_REDIRECT");
+        break;
+    default:
+        break;
+    }
+    return ESP_OK;
+}
+
+esp_err_t perform_ota_update(void) {
+
+    esp_netif_ip_info_t ip;
+    esp_netif_get_ip_info(esp_netif_get_handle_from_ifkey("WIFI_STA_DEF"), &ip);
 
     ESP_LOGI(TAG_OTA, "Starting OTA update...");
 
@@ -115,6 +156,7 @@ esp_err_t perform_ota_update(void)
             .crt_bundle_attach = esp_crt_bundle_attach,
             .skip_cert_common_name_check = true,
             .keep_alive_enable = true,
+            .timeout_ms = 60000,
         },
         .partial_http_download = true,
     };
@@ -122,64 +164,19 @@ esp_err_t perform_ota_update(void)
     esp_err_t ret = esp_https_ota(&ota_config);
 
     if (ret == ESP_OK) {
-        ESP_LOGI("OTA", "OTA success, restarting...");
+        const esp_partition_t *ota = esp_ota_get_next_update_partition(NULL);
+        esp_ota_set_boot_partition(ota);
+
+        ESP_LOGI("OTA", "OTA OK, restarting...");
+
+        vTaskDelay(pdMS_TO_TICKS(100));
         esp_restart();
-    } else {
-        ESP_LOGE("OTA", "OTA failed: %s", esp_err_to_name(ret));
-    }
-/*
-    esp_https_ota_handle_t https_ota_handle = NULL;
-    esp_err_t err = esp_https_ota_begin(&ota_config, &https_ota_handle);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG_OTA, "esp_https_ota_begin failed: %s", esp_err_to_name(err));
-        return err;
+        return ESP_OK; // Never will be returned
+    } 
+    else {
+        ESP_LOGE("OTA", "OTA failed");
     }
 
-    esp_app_desc_t new_app_info;
-    err = esp_https_ota_get_img_desc(https_ota_handle, &new_app_info);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG_OTA, "Failed to read new image description: %s", esp_err_to_name(err));
-        esp_https_ota_abort(https_ota_handle);
-        return err;
-    }
-
-    const esp_app_desc_t *running_desc = esp_app_get_description();
-    ESP_LOGI(TAG_OTA, "Running version: %s", running_desc->version);
-    ESP_LOGI(TAG_OTA, "New image  version: %s", new_app_info.version);
-
-
-    if (memcmp(new_app_info.version, running_desc->version, sizeof(new_app_info.version)) == 0) {
-        ESP_LOGI(TAG_OTA, "No new firmware. Versions match.");
-        esp_https_ota_abort(https_ota_handle);
-        return ESP_OK;
-    }
-
-    ESP_LOGI(TAG_OTA, "New firmware available, starting download/flash...");
-
-    while ((err = esp_https_ota_perform(https_ota_handle)) == ESP_ERR_HTTPS_OTA_IN_PROGRESS) {
-        int bytes_downloaded = esp_https_ota_get_image_len_read(https_ota_handle);
-        ESP_LOGI(TAG_OTA, "Downloaded %d bytes...", bytes_downloaded);
-        esp_task_wdt_reset();
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
-
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG_OTA, "esp_https_ota_perform failed: %s", esp_err_to_name(err));
-        esp_https_ota_abort(https_ota_handle);
-        return err;
-    }
-
-    err = esp_https_ota_finish(https_ota_handle);
-    if (err == ESP_OK) {
-        ESP_LOGI(TAG_OTA, "OTA finished successfully, rebooting...");
-        esp_restart();
-    } else {
-        ESP_LOGE(TAG_OTA, "esp_https_ota_finish failed: %s", esp_err_to_name(err));
-        esp_https_ota_abort(https_ota_handle);
-        return err;
-    }
-
-    */
     return ESP_FAIL;
 }
 
@@ -203,6 +200,13 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t e
         ESP_LOGI(TAGWIFI, "Got IP: " IPSTR, IP2STR(&event->ip_info.ip));
         s_retry_num = 0;
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+        esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+
+        esp_netif_dns_info_t dns;
+        dns.ip.u_addr.ip4.addr = esp_ip4addr_aton("8.8.8.8");  // Google DNS
+        esp_netif_set_dns_info(netif, ESP_NETIF_DNS_MAIN, &dns);
+
+        ESP_LOGI(TAGWIFI, "DNS 8.8.8.8 defined");
     }
 }
 
@@ -222,15 +226,21 @@ int analogRead_adc1(void) {
 void logic_control(void) {
     static float oldEr = 0.0f;
     float er = setpoint - waterTemp;
-    float p = er * KP;
+    float p = 0.0f;
     static float i = 0.0f;
     float d = 0.0f;
 
+    p = er * KP;
+    if (p > 255.00f) p = 255.00f;
+    else if (p < -255.00f) p = -255.00f;
+
     i += er * KI;
     if (i > 255.00f) i = 255.00f;
-    else if (i < 0.00f) i = 0.00f;
+    else if (i < -255.00f) i = -255.00f;
 
     d = (er - oldEr) * KD;
+    if (d > 255.00f) d = 255.00f;
+    else if (d < -255.00f) d = -255.00f;
 
     oldEr = er;
 
@@ -259,17 +269,17 @@ void logic_control(void) {
         ESP_LOGW(TAG_BTN, "Overtime On!");
     }
 
-    ESP_LOGI(TAG_CTRL, "Temp %.2f  PID %d", waterTemp, PID);
+    ESP_LOGD(TAG_CTRL, "Temp %.2f  PID %d", waterTemp, PID);
 }
 
 void power_control(void) {
     if (commandBtn && !heatError) {
         vTaskDelay(pdMS_TO_TICKS(1));
-        if (commandBtn && PID > 127)
-            gpio_set_level(OUT_POWER, 1);
-        else
-            gpio_set_level(OUT_POWER, 0);
-    } else {
+        
+        if (commandBtn && PID > 127) gpio_set_level(OUT_POWER, 1);
+        else gpio_set_level(OUT_POWER, 0);
+    } 
+    else {
         gpio_set_level(OUT_POWER, 0);
     }
 }
@@ -301,6 +311,7 @@ void temperature_task(void *arg) {
             heatError = true;
             waterTemp = 199.00f;
             ESP_LOGE(TAG_TEMP, "Temp Sensor Error! Voltage:%f", voltage);
+            vTaskDelay(pdMS_TO_TICKS(500));
             continue;
         }
 
@@ -506,4 +517,7 @@ void app_main(void) {
     ESP_LOGI(TAGWIFI, "Wifi Ready!");
 
     sync_time();
+
+    const esp_partition_t *ota = esp_ota_get_next_update_partition(NULL);
+    esp_ota_set_boot_partition(ota);
 }
