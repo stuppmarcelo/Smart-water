@@ -518,6 +518,8 @@ void app_main(void) {
 
     sync_time();
 
-    const esp_partition_t *ota = esp_ota_get_next_update_partition(NULL);
-    esp_ota_set_boot_partition(ota);
+    esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
+    if (err != ESP_OK) {
+        ESP_LOGE("OTA", "Failed to mark app valid (%s)", esp_err_to_name(err));
+    }
 }
