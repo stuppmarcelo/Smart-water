@@ -31,7 +31,7 @@
 
 #include "esp_crt_bundle.h"
 
-#define OUT_POWER GPIO_NUM_2
+#define OUT_POWER GPIO_NUM_19
 #define IN_ZERO_CROSSING GPIO_NUM_18
 #define IN_BTN GPIO_NUM_21
 #define NTC_PIN ADC_CHANNEL_6
