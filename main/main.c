@@ -36,7 +36,7 @@
 #define IN_BTN GPIO_NUM_21
 #define NTC_PIN ADC_CHANNEL_6
 
-#define TIME_CONTROL_INTERVAL 50
+#define TIME_CONTROL_INTERVAL 250
 #define TIME_ADC_INTERVAL 50
 #define MAX_TIMER_ON 300000
 
@@ -47,8 +47,8 @@
 #define FACTORADC 0.01f
 
 #define KP 5.00f
-#define KI 0.0008f
-#define KD 200.00f
+#define KI 0.004f
+#define KD 40.00f
 
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT      BIT1
@@ -65,22 +65,26 @@ static const char *TAGWIFI = "wifi";
 static const char *TAG_OTA = "OTA";
 static const char *TAG_TEMP = "temperature_control";
 static const char *TAG_CTRL = "control";
+static const char *TAG_PW = "out_power";
 static const char *TAG_BTN = "button_process";
 
-
+const float coffeeSetpoint = 75.0f;
+const float boilingSetpoint = 120.0f;
 float setpoint = 80.0f;
 float waterTemp = 25.0f;
 
+volatile uint32_t crossedTime = 0;
+volatile uint32_t lastCrossedTime = 0;
 uint32_t timerOperate = 0;
 uint32_t timerBtn = 0;
 uint16_t lastTimeBtn = 0;
 
-uint16_t PID = 0;
+volatile int16_t PID = 0;
 
 uint8_t ErrorCounter = 0;
 
+volatile bool isCrossing = false;
 bool commandBtn = false;
-bool isCrossing = false;
 bool heatError = false;
 
 // ADC
@@ -92,10 +96,13 @@ bool adc_calibrated = false;
 #define SSID "M&M"
 #define PASSWORD "39402100"
 
+static TaskHandle_t powerTaskHandle = NULL;
+
+// Triac timer
+static esp_timer_handle_t triac_timer;
+
 // ********* Function prototypes *********
 int analogRead_adc1(void);
-void logic_control(void);
-void power_control(void);
 void gpio_setup(void);
 void wifi_init_sta(void);
 void adc_init(void);
@@ -210,6 +217,18 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t e
     }
 }
 
+static void IRAM_ATTR zero_cross_isr(void *arg) {
+    isCrossing = true;
+    lastCrossedTime = crossedTime;
+    crossedTime = esp_timer_get_time();
+
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    xTaskNotifyFromISR(powerTaskHandle, 0, eNoAction, &xHigherPriorityTaskWoken);
+    if (xHigherPriorityTaskWoken) {
+        portYIELD_FROM_ISR();
+    }
+}
+
 int analogRead_adc1(void) {
     int raw = 0;
     ESP_ERROR_CHECK(adc_oneshot_read(adc_handle, NTC_PIN, &raw));
@@ -223,76 +242,131 @@ int analogRead_adc1(void) {
     return raw; // fallback when no calibration is possible
 }
 
-void logic_control(void) {
+static void triac_fire_cb(void *arg) {
+    if (heatError || PID <= 0) {
+        return;
+    }
+
+    gpio_set_level(OUT_POWER, 1);   // Gate ON
+    esp_rom_delay_us(100);          // Gate time
+    gpio_set_level(OUT_POWER, 0);   // Gate OFF
+}
+
+static void init_triac_timer(void) {
+    const esp_timer_create_args_t timer_args = {
+        .callback = &triac_fire_cb,
+        .name = "triac_timer"
+    };
+
+    ESP_ERROR_CHECK(esp_timer_create(&timer_args, &triac_timer));
+}
+
+void power_control_task(void *arg) {
+
+    powerTaskHandle = xTaskGetCurrentTaskHandle();
+    esp_task_wdt_add(NULL);
+
+    uint32_t cycleTime = 0;
+    uint32_t timeToWait = 0;
+
+    while (!heatError){
+        esp_task_wdt_reset();
+
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY); // Wait notify from ISR
+
+        gpio_set_level(OUT_POWER, 0); // Turn off the output when it's reach the zero point
+
+        cycleTime = crossedTime - lastCrossedTime; // Calculates the cycle time
+
+        if (cycleTime < 8000 || cycleTime > 10500) cycleTime = 8333; // fallback 60Hz
+
+        if (PID <= 0) continue; // Return loop until have a valid PID val
+
+        timeToWait = (cycleTime / 255) * (255 - PID); // Calculate how many time wait to turn the output on
+        timeToWait += crossedTime; // Sum this to a global time
+
+        uint32_t delay_us = timeToWait - esp_timer_get_time(); // Calculate correct delay based on global time
+
+        // Cancel any pending timer
+        esp_timer_stop(triac_timer);
+
+        // Schedule TRIAC fire
+        esp_timer_start_once(triac_timer, delay_us);
+    }
+
+    gpio_set_level(OUT_POWER, 0);
+
+    ESP_LOGW(TAG_PW, "Power task was deleted and output turned off");
+
+    vTaskDelete(NULL);
+}
+
+void logic_control_task(void *arg) {
+
+    esp_task_wdt_add(NULL);
+
     static float oldEr = 0.0f;
-    float er = setpoint - waterTemp;
+    float er = 0.0f;
     float p = 0.0f;
     static float i = 0.0f;
     float d = 0.0f;
 
-    p = er * KP;
-    if (p > 255.00f) p = 255.00f;
-    else if (p < -255.00f) p = -255.00f;
-
-    i += er * KI;
-    if (i > 255.00f) i = 255.00f;
-    else if (i < -255.00f) i = -255.00f;
-
-    d = (er - oldEr) * KD;
-    if (d > 255.00f) d = 255.00f;
-    else if (d < -255.00f) d = -255.00f;
-
-    oldEr = er;
-
-    PID = p + i + d;
-    if (PID > 255) PID = 255;
-
-    // Button logic
-    if (timerBtn < MAX_TIMER_ON) {
-        if (!gpio_get_level(IN_BTN)) {
-            vTaskDelay(pdMS_TO_TICKS(1));
-            commandBtn = !gpio_get_level(IN_BTN);
-        } else {
-            commandBtn = false;
-            i = 0.0f;
-        }
-
-        if (lastTimeBtn > 10 && lastTimeBtn < 100 && commandBtn) {
-            setpoint = 120.0f;
-            lastTimeBtn = 0;
-        }
-
-        if (!commandBtn && lastTimeBtn == 0) setpoint = 80.0f;
-
-    } else {
-        heatError = true;
-        ESP_LOGW(TAG_BTN, "Overtime On!");
-    }
-
-    ESP_LOGD(TAG_CTRL, "Temp %.2f  PID %d", waterTemp, PID);
-}
-
-void power_control(void) {
-    if (commandBtn && !heatError) {
-        vTaskDelay(pdMS_TO_TICKS(1));
-        
-        if (commandBtn && PID > 127) gpio_set_level(OUT_POWER, 1);
-        else gpio_set_level(OUT_POWER, 0);
-    } 
-    else {
-        gpio_set_level(OUT_POWER, 0);
-    }
-}
-
-void control_task(void *arg) {
-
-    esp_task_wdt_add(NULL);
-
     while (1) {
-        logic_control();
-        power_control();
-        
+
         esp_task_wdt_reset();
+
+        // *********** Btn logic  ***********
+        if (timerBtn < MAX_TIMER_ON) {
+            if (!gpio_get_level(IN_BTN)) {
+                vTaskDelay(pdMS_TO_TICKS(1));
+                commandBtn = !gpio_get_level(IN_BTN);
+            } else {
+                commandBtn = false;
+                i = 0.0f;
+            }
+
+            if (lastTimeBtn > 10 && lastTimeBtn < 100 && commandBtn) {
+                setpoint = boilingSetpoint;
+            }
+
+            if (!commandBtn) setpoint = coffeeSetpoint;
+
+        } else {
+            heatError = true;
+            i = 0.0f;
+            PID = 0;
+            ESP_LOGW(TAG_BTN, "Overtime On!");
+            vTaskDelay(pdMS_TO_TICKS(500));
+            continue;
+        }
+
+        // *********** PID Control  *********** 
+        if (!commandBtn) {
+            PID = 0;
+            vTaskDelay(pdMS_TO_TICKS(TIME_CONTROL_INTERVAL * 2)); // Double time because nothing needs to be calculated
+            ESP_LOGD(TAG_CTRL, "Btn off, skiping PID logic");
+            continue;
+        }
+        er = setpoint - waterTemp;
+        p = er * KP;
+        if (p > 255.00f) p = 255.00f;
+        else if (p < -255.00f) p = -255.00f;
+
+        i += er * KI;
+        if (i > 255.00f) i = 255.00f;
+        else if (i < -255.00f) i = -255.00f;
+
+        d = (er - oldEr) * KD;
+        if (d > 255.00f) d = 255.00f;
+        else if (d < -255.00f) d = -255.00f;
+
+        oldEr = er;
+
+        PID = p + i + d;
+        if (PID < 20) PID = 0;
+        else if (PID > 255) PID = 255;
+
+        ESP_LOGD(TAG_CTRL, "Temp %.2f  PID %d", waterTemp, PID);
         vTaskDelay(pdMS_TO_TICKS(TIME_CONTROL_INTERVAL));
     }
 }
@@ -366,6 +440,10 @@ void gpio_setup(void) {
     gpio_set_pull_mode(IN_ZERO_CROSSING, GPIO_PULLUP_ONLY);
     gpio_set_pull_mode(IN_BTN, GPIO_PULLUP_ONLY);
     gpio_set_level(OUT_POWER, 0);
+
+    gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
+    gpio_set_intr_type(IN_ZERO_CROSSING, GPIO_INTR_POSEDGE);
+    gpio_isr_handler_add(IN_ZERO_CROSSING, zero_cross_isr, NULL);
 }
  
 void wifi_init_sta(void)
@@ -501,8 +579,12 @@ void app_main(void) {
     // ADC Setup
     adc_init();
 
+    // Triac timer init
+    init_triac_timer();
+
     // Start loop task
-    xTaskCreate(control_task, "control", 4096, NULL, 2, NULL);
+    xTaskCreate(logic_control_task, "logic_control", 4096, NULL, 2, NULL);
+    xTaskCreate(power_control_task, "power_control", 4096, NULL, 1, NULL);
     xTaskCreate(temperature_task, "temperature", 4096, NULL, 1, NULL);
     xTaskCreatePinnedToCore(aux_task, "auxiliar", 4096, NULL, 5, NULL, 1);  
 
