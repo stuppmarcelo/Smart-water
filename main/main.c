@@ -46,8 +46,8 @@
 #define SERIE_RESISTOR 10000.0f
 #define FACTORADC 0.01f
 
-#define KP 5.00f
-#define KI 0.004f
+#define KP 12.00f
+#define KI 0.0004f
 #define KD 40.00f
 
 #define WIFI_CONNECTED_BIT BIT0
@@ -220,7 +220,7 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base, int32_t e
 static void IRAM_ATTR zero_cross_isr(void *arg) {
     isCrossing = true;
     lastCrossedTime = crossedTime;
-    crossedTime = esp_timer_get_time();
+    crossedTime = esp_timer_get_time() + 125; // global time + half pulse opto windown time
 
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
     xTaskNotifyFromISR(powerTaskHandle, 0, eNoAction, &xHigherPriorityTaskWoken);
@@ -248,7 +248,7 @@ static void triac_fire_cb(void *arg) {
     }
 
     gpio_set_level(OUT_POWER, 1);   // Gate ON
-    esp_rom_delay_us(100);          // Gate time
+    esp_rom_delay_us(200);          // Gate time
     gpio_set_level(OUT_POWER, 0);   // Gate OFF
 }
 
@@ -326,7 +326,9 @@ void logic_control_task(void *arg) {
             }
 
             if (lastTimeBtn > 10 && lastTimeBtn < 100 && commandBtn) {
-                setpoint = boilingSetpoint;
+                setpoint = boilingSetpoint; // Update setpoint with the new value
+                lastTimeBtn = 0; // Reset timer count to enter here once
+                oldEr = setpoint - waterTemp; // Update oldError to avoid wrong oscilation
             }
 
             if (!commandBtn) setpoint = coffeeSetpoint;
@@ -362,7 +364,7 @@ void logic_control_task(void *arg) {
 
         oldEr = er;
 
-        PID = p + i + d;
+        PID = (int16_t)(p + i + d);
         if (PID < 20) PID = 0;
         else if (PID > 255) PID = 255;
 
@@ -583,10 +585,10 @@ void app_main(void) {
     init_triac_timer();
 
     // Start loop task
-    xTaskCreate(logic_control_task, "logic_control", 4096, NULL, 2, NULL);
-    xTaskCreate(power_control_task, "power_control", 4096, NULL, 1, NULL);
-    xTaskCreate(temperature_task, "temperature", 4096, NULL, 1, NULL);
-    xTaskCreatePinnedToCore(aux_task, "auxiliar", 4096, NULL, 5, NULL, 1);  
+    xTaskCreate(logic_control_task, "logic_control", 4096, NULL, 3, NULL);
+    xTaskCreate(power_control_task, "power_control", 4096, NULL, 5, NULL);
+    xTaskCreate(temperature_task, "temperature", 4096, NULL, 5, NULL);
+    xTaskCreatePinnedToCore(aux_task, "auxiliar", 4096, NULL, 1, NULL, 1);  
 
 
     // NVS init
