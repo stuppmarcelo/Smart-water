@@ -1,4 +1,6 @@
 /build
 /components
+/.vscode
 *.log
+*.DS_Store
 **/*.tmp
