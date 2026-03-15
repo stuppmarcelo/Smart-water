@@ -121,7 +121,7 @@ static void IRAM_ATTR zero_cross_isr(void *arg)
 {
     isCrossing        = true;
     lastCrossedTime   = crossedTime;
-    crossedTime       = esp_timer_get_time() + 125; // +125 µs: opto propagation delay
+    crossedTime       = esp_timer_get_time() - 500;
 
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
     xTaskNotifyFromISR(powerTaskHandle, 0, eNoAction, &xHigherPriorityTaskWoken);
@@ -139,6 +139,12 @@ static void triac_fire_cb(void *arg)
     gpio_set_level(OUT_POWER, 1);
     esp_rom_delay_us(200);
     gpio_set_level(OUT_POWER, 0);
+}
+
+// Called by power_control_task once powerTaskHandle is assigned.
+static void gpio_isr_enable(void)
+{
+    gpio_intr_enable(IN_ZERO_CROSSING);
 }
 
 // ─────────────────────────────────────────────
@@ -169,8 +175,11 @@ void power_control_task(void *arg)
     powerTaskHandle = xTaskGetCurrentTaskHandle();
     esp_task_wdt_add(NULL);
 
-    uint32_t cycleTime  = 0;
-    uint32_t timeToWait = 0;
+    // Safe to enable the ISR now — powerTaskHandle is valid
+    gpio_isr_enable();
+
+    uint32_t cycleTime  = 8333;
+    int64_t  timeToWait = 0;
 
     while (!heatError) {
         esp_task_wdt_reset();
@@ -184,13 +193,17 @@ void power_control_task(void *arg)
 
         if (PID <= 0) continue;
 
-        timeToWait  = (cycleTime / 255) * (255 - PID);
-        timeToWait += crossedTime;
+        timeToWait = (int64_t)crossedTime
+                   + (int64_t)(cycleTime * (255 - PID) / 255);
 
-        uint32_t delay_us = timeToWait - esp_timer_get_time();
+        int64_t delay_us = timeToWait - esp_timer_get_time();
+
+        // Guard: if the firing moment already passed, skip this cycle
+        // instead of scheduling a timer for billions of microseconds
+        if (delay_us <= 1 || delay_us > 8300) continue;
 
         esp_timer_stop(triac_timer);
-        esp_timer_start_once(triac_timer, delay_us);
+        esp_timer_start_once(triac_timer, (uint64_t)delay_us);
     }
 
     gpio_set_level(OUT_POWER, 0);
@@ -295,7 +308,7 @@ void logic_control_task(void *arg)
         oldEr = er;
 
         PID = (int16_t)(p + i + d);
-        if      (PID <  20) PID = 0;
+        if      (PID <  25) PID = 0;
         else if (PID > 255) PID = 255;
 
         // Write setpoint back under mutex so telemetry task sees the active value
@@ -365,7 +378,10 @@ void temperature_task(void *arg)
 
 void aux_task(void *arg)
 {
+    esp_task_wdt_add(NULL);
+
     while (1) {
+        esp_task_wdt_reset();
         if (commandBtn) {
             timerBtn++;
             // User is active — reset the hibernate countdown
@@ -441,9 +457,12 @@ static void gpio_setup(void)
     gpio_set_pull_mode(IN_BTN,           GPIO_PULLUP_ONLY);
     gpio_set_level(OUT_POWER, 0);
 
+    // ISR service installed here but interrupt NOT yet enabled.
+    // gpio_isr_enable() is called after powerTaskHandle is valid.
     gpio_install_isr_service(ESP_INTR_FLAG_IRAM);
     gpio_set_intr_type(IN_ZERO_CROSSING, GPIO_INTR_POSEDGE);
     gpio_isr_handler_add(IN_ZERO_CROSSING, zero_cross_isr, NULL);
+    gpio_intr_disable(IN_ZERO_CROSSING);  // disabled until task is ready
 }
 
 // ─────────────────────────────────────────────
@@ -529,7 +548,7 @@ static void sync_time(void)
 
 void app_main(void)
 {
-    // 1. Hardware init (no dependencies)
+    // 1. Hardware init — ISR disabled until power_control_task is ready
     gpio_setup();
     adc_init();
     init_triac_timer();
@@ -538,17 +557,17 @@ void app_main(void)
     xTempMutex = xSemaphoreCreateMutex();
     configASSERT(xTempMutex);
 
-    // 3. NVS — must come before WiFi and config load
+    // 3. NVS — before config load and before any task that reads g_ws_config
     ESP_ERROR_CHECK(nvs_flash_init());
 
-    // 4. Load persisted config from NVS into g_ws_config
-    //    (setpoints, PID gains, hibernate timeout)
+    // 4. Load persisted config (setpoints, PID gains, hibernate timeout)
+    //    Must happen before tasks start so aux_task reads the correct timeout
     webserver_config_load_nvs();
 
-    // 5. Mount SPIFFS — must come before webserver_start() inside wifi_manager_init()
+    // 5. Mount SPIFFS — before webserver_start() inside wifi_manager_init()
     esp_vfs_spiffs_conf_t spiffs_cfg = {
         .base_path              = "/spiffs",
-        .partition_label        = NULL,   // first SPIFFS partition in table
+        .partition_label        = NULL,
         .max_files              = 4,
         .format_if_mount_failed = false,
     };
@@ -563,28 +582,32 @@ void app_main(void)
                  (int)(used / 1024), (int)(total / 1024));
     }
 
-    // 6. Control tasks — start before WiFi so heating works even offline
-    xTaskCreate(logic_control_task, "logic_control", 4096, NULL, 3, NULL);
+    // 6. Control tasks — heating operational before WiFi/webserver init begins
+    //    power_control_task enables the zero-crossing ISR internally once ready
     xTaskCreate(power_control_task, "power_control", 4096, NULL, 5, NULL);
     xTaskCreate(temperature_task,   "temperature",   4096, NULL, 5, NULL);
+    xTaskCreate(logic_control_task, "logic_control", 4096, NULL, 3, NULL);
     xTaskCreatePinnedToCore(aux_task, "aux", 4096, NULL, 1, NULL, 1);
-    xTaskCreate(telemetry_task, "telemetry", 3072, NULL, 2, NULL);
 
-    // 7. Network infrastructure — initialised once here, not inside wifi_manager
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-
-    // 8. WiFi: STA (from NVS) or AP fallback + mDNS + webserver
-    wifi_manager_init();
-
-    // 9. NTP — only useful in STA mode, harmless in AP mode (will time out quietly)
-    if (wifi_manager_get_mode() == WIFI_MODE_STA_CONNECTED) {
-        sync_time();
-    }
-
-    // 10. Mark OTA partition valid (cancel rollback timer)
+    // 7. Mark OTA partition valid here — before any blocking operation (NTP, WiFi)
+    //    This ensures the rollback timer is cancelled even if WiFi or NTP hangs
     esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
     if (err != ESP_OK) {
         ESP_LOGE("OTA", "Failed to mark app valid: %s", esp_err_to_name(err));
+    }
+
+    // 8. Network infrastructure
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+
+    // 9. WiFi: STA (from NVS) or AP fallback + mDNS + webserver
+    wifi_manager_init();
+
+    // 10. Telemetry — started after webserver so history buffer is ready
+    xTaskCreate(telemetry_task, "telemetry", 3072, NULL, 2, NULL);
+
+    // 11. NTP — only in STA mode, non-blocking for the rest of the system
+    if (wifi_manager_get_mode() == WIFI_MODE_STA_CONNECTED) {
+        sync_time();
     }
 }
