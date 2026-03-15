@@ -15,7 +15,7 @@
 // NVS keys
 #define NVS_NAMESPACE    "wifi_cfg"
 #define NVS_KEY_SSID     "ssid"
-#define NVS_KEY_PASS     "pass"
+#define NVS_KEY_PASS     "password"
 
 // mDNS
 #define MDNS_HOSTNAME    "smartwater"

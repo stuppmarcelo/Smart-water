@@ -1,0 +1,1364 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Smart Water</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><text y='28' font-size='28'>☕</text></svg>">
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=DM+Sans:wght@300;400;500&display=swap');
+
+  :root {
+    --bg:        #0d0f12;
+    --surface:   #141720;
+    --border:    #1e2330;
+    --accent:    #e8773a;
+    --accent2:   #3ab8e8;
+    --danger:    #e84040;
+    --success:   #3ae87a;
+    --text:      #e8e6e0;
+    --muted:     #5a6070;
+    --mono:      'DM Mono', monospace;
+    --sans:      'DM Sans', sans-serif;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--sans);
+    font-size: 14px;
+    min-height: 100vh;
+    line-height: 1.5;
+  }
+
+  /* ── Header ── */
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 18px 32px;
+    border-bottom: 1px solid var(--border);
+    position: sticky;
+    top: 0;
+    background: var(--bg);
+    z-index: 100;
+  }
+
+  .logo {
+    font-family: var(--mono);
+    font-size: 13px;
+    font-weight: 500;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--accent);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .logo-dot {
+    width: 8px; height: 8px;
+    border-radius: 50%;
+    background: var(--accent);
+    animation: pulse 2s ease-in-out infinite;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50%       { opacity: 0.4; transform: scale(0.7); }
+  }
+
+  .status-badge {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.08em;
+    padding: 4px 10px;
+    border-radius: 20px;
+    border: 1px solid;
+    display: flex;
+    align-items: center;
+    gap: 6px;
+  }
+
+  .status-badge.online  { color: var(--success); border-color: var(--success); }
+  .status-badge.offline { color: var(--danger);  border-color: var(--danger);  }
+  .status-badge.ap      { color: var(--accent);  border-color: var(--accent);  }
+
+  .status-badge::before {
+    content: '';
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+  }
+
+  .header-right {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .hibernate-countdown {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.06em;
+    color: var(--muted);
+    display: flex;
+    align-items: center;
+    gap: 5px;
+  }
+
+  .hibernate-countdown.warning { color: var(--danger); }
+
+  .hibernate-countdown::before {
+    content: '';
+    display: inline-block;
+    width: 6px; height: 6px;
+    border-radius: 50%;
+    background: currentColor;
+    opacity: 0.5;
+  }
+
+  /* ── Layout ── */
+  main {
+    max-width: 960px;
+    margin: 0 auto;
+    padding: 32px 24px 64px;
+    display: flex;
+    flex-direction: column;
+    gap: 24px;
+  }
+
+  /* ── Cards ── */
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+
+  .card-header {
+    padding: 16px 24px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+  }
+
+  .card-title {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .card-body { padding: 24px; }
+
+  /* ── Big Temp Display ── */
+  .temp-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 1px;
+    background: var(--border);
+  }
+
+  .temp-cell {
+    background: var(--surface);
+    padding: 28px 24px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .temp-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .temp-value {
+    font-family: var(--mono);
+    font-size: 42px;
+    font-weight: 300;
+    line-height: 1;
+    color: var(--text);
+  }
+
+  .temp-value span {
+    font-size: 16px;
+    color: var(--muted);
+    margin-left: 2px;
+  }
+
+  .temp-value.hot   { color: var(--accent); }
+  .temp-value.cold  { color: var(--accent2); }
+
+  .temp-sub {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+  }
+
+  /* ── Chart ── */
+  .chart-wrap {
+    position: relative;
+    height: 200px;
+    padding: 0 4px;
+  }
+
+  canvas#tempChart { width: 100% !important; height: 100% !important; }
+
+  /* ── PID bar ── */
+  .pid-row {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 16px 24px;
+    border-top: 1px solid var(--border);
+  }
+
+  .pid-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+
+  .pid-bar-wrap {
+    flex: 1;
+    height: 4px;
+    background: var(--border);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+
+  .pid-bar {
+    height: 100%;
+    border-radius: 2px;
+    background: var(--accent);
+    transition: width 0.5s ease;
+  }
+
+  .pid-val {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text);
+    min-width: 36px;
+    text-align: right;
+  }
+
+  /* ── Setpoint Controls ── */
+  .setpoint-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+
+  .sp-card {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+    transition: border-color 0.2s;
+  }
+
+  .sp-card:hover { border-color: var(--accent); }
+
+  .sp-name {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .sp-temp-display {
+    font-family: var(--mono);
+    font-size: 32px;
+    font-weight: 300;
+    color: var(--text);
+    line-height: 1;
+  }
+
+  .sp-temp-display span { font-size: 14px; color: var(--muted); }
+
+  .sp-slider-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  input[type=range] {
+    flex: 1;
+    -webkit-appearance: none;
+    height: 3px;
+    background: var(--border);
+    border-radius: 2px;
+    outline: none;
+  }
+
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 14px; height: 14px;
+    border-radius: 50%;
+    background: var(--accent);
+    cursor: pointer;
+    border: 2px solid var(--bg);
+    transition: transform 0.15s;
+  }
+
+  input[type=range]::-webkit-slider-thumb:hover { transform: scale(1.3); }
+
+  .sp-limits {
+    display: flex;
+    justify-content: space-between;
+    font-family: var(--mono);
+    font-size: 10px;
+    color: var(--muted);
+  }
+
+  .btn {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    padding: 10px 18px;
+    border-radius: 6px;
+    border: 1px solid;
+    cursor: pointer;
+    transition: all 0.15s;
+    background: transparent;
+  }
+
+  .btn-primary {
+    color: var(--accent);
+    border-color: var(--accent);
+  }
+
+  .btn-primary:hover {
+    background: var(--accent);
+    color: var(--bg);
+  }
+
+  .btn-danger {
+    color: var(--danger);
+    border-color: var(--danger);
+  }
+
+  .btn-danger:hover {
+    background: var(--danger);
+    color: var(--bg);
+  }
+
+  .btn-secondary {
+    color: var(--muted);
+    border-color: var(--border);
+  }
+
+  .btn-secondary:hover {
+    border-color: var(--muted);
+    color: var(--text);
+  }
+
+  /* ── Forms ── */
+  .form-group {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+
+  .form-label {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .form-input {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 10px 14px;
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 13px;
+    outline: none;
+    transition: border-color 0.2s;
+    width: 100%;
+  }
+
+  .form-input:focus { border-color: var(--accent); }
+  .form-input::placeholder { color: var(--muted); }
+
+  .form-row {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 16px;
+  }
+
+  .form-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    padding-top: 8px;
+  }
+
+  /* ── OTA Upload ── */
+  .ota-drop {
+    border: 1px dashed var(--border);
+    border-radius: 8px;
+    padding: 32px;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.2s;
+    position: relative;
+  }
+
+  .ota-drop:hover, .ota-drop.drag-over {
+    border-color: var(--accent);
+    background: rgba(232, 119, 58, 0.04);
+  }
+
+  .ota-drop input[type=file] {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    cursor: pointer;
+    width: 100%;
+    height: 100%;
+  }
+
+  .ota-icon {
+    font-size: 28px;
+    margin-bottom: 10px;
+    opacity: 0.4;
+  }
+
+  .ota-text {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+    line-height: 1.7;
+  }
+
+  .ota-text strong {
+    color: var(--accent);
+    font-weight: 400;
+  }
+
+  .ota-progress {
+    display: none;
+    flex-direction: column;
+    gap: 10px;
+    padding-top: 16px;
+  }
+
+  .ota-progress.visible { display: flex; }
+
+  .progress-bar-wrap {
+    height: 3px;
+    background: var(--border);
+    border-radius: 2px;
+    overflow: hidden;
+  }
+
+  .progress-bar {
+    height: 100%;
+    background: var(--accent);
+    border-radius: 2px;
+    width: 0%;
+    transition: width 0.3s ease;
+  }
+
+  .progress-label {
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    display: flex;
+    justify-content: space-between;
+  }
+
+  /* ── System Info ── */
+  .info-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 1px;
+    background: var(--border);
+    border-radius: 8px;
+    overflow: hidden;
+  }
+
+  .info-cell {
+    background: var(--surface);
+    padding: 16px 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+  }
+
+  .info-key {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .info-val {
+    font-family: var(--mono);
+    font-size: 14px;
+    color: var(--text);
+  }
+
+  /* ── Toast ── */
+  #toast {
+    position: fixed;
+    bottom: 28px;
+    right: 28px;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 12px 18px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text);
+    z-index: 999;
+    transform: translateY(80px);
+    opacity: 0;
+    transition: all 0.3s ease;
+    max-width: 280px;
+  }
+
+  #toast.show {
+    transform: translateY(0);
+    opacity: 1;
+  }
+
+  #toast.success { border-color: var(--success); color: var(--success); }
+  #toast.error   { border-color: var(--danger);  color: var(--danger);  }
+
+  /* ── Divider ── */
+  .section-divider {
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--muted);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+
+  .section-divider::after {
+    content: '';
+    flex: 1;
+    height: 1px;
+    background: var(--border);
+  }
+
+  /* ── Confirmation modal ── */
+  .modal-backdrop {
+    display: none;
+    position: fixed;
+    inset: 0;
+    background: rgba(0,0,0,0.65);
+    z-index: 200;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .modal-backdrop.open { display: flex; }
+
+  .modal {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 28px;
+    max-width: 380px;
+    width: calc(100% - 48px);
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+  }
+
+  .modal-title {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--accent);
+  }
+
+  .modal-body {
+    font-size: 13px;
+    color: var(--muted);
+    line-height: 1.7;
+  }
+
+  .modal-body strong {
+    color: var(--danger);
+    font-weight: 500;
+  }
+
+  .modal-values {
+    background: var(--bg);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    padding: 12px 16px;
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--text);
+    display: flex;
+    gap: 20px;
+  }
+
+  .modal-actions {
+    display: flex;
+    justify-content: flex-end;
+    gap: 10px;
+    padding-top: 4px;
+  }
+
+  /* ── Maintenance panel ── */
+  .maint-toggle {
+    width: 100%;
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 16px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    cursor: pointer;
+    font-family: var(--mono);
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+    color: var(--muted);
+    transition: border-color 0.2s, color 0.2s;
+  }
+
+  .maint-toggle:hover { border-color: var(--accent); color: var(--accent); }
+
+  .maint-toggle .chevron {
+    transition: transform 0.3s ease;
+    font-size: 12px;
+    opacity: 0.5;
+  }
+
+  .maint-toggle.open .chevron { transform: rotate(180deg); }
+
+  .maint-body {
+    display: none;
+    flex-direction: column;
+    gap: 24px;
+    padding-top: 4px;
+  }
+
+  .maint-body.open { display: flex; }
+
+  /* PID inputs */
+  .pid-grid {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+  }
+
+  .pid-input-wrap {
+    display: flex;
+    flex-direction: column;
+    gap: 10px;
+  }
+
+  .pid-const-label {
+    font-family: var(--mono);
+    font-size: 11px;
+    letter-spacing: 0.1em;
+    color: var(--muted);
+    display: flex;
+    justify-content: space-between;
+    align-items: baseline;
+  }
+
+  .pid-const-label span {
+    font-size: 14px;
+    color: var(--text);
+    letter-spacing: 0;
+  }
+
+  /* ── Responsive ── */
+  @media (max-width: 600px) {
+    header { padding: 14px 16px; }
+    main   { padding: 20px 16px 48px; }
+    .temp-row        { grid-template-columns: 1fr; }
+    .setpoint-grid   { grid-template-columns: 1fr; }
+    .form-row        { grid-template-columns: 1fr; }
+    .info-grid       { grid-template-columns: 1fr 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-dot"></div>
+    Smart Water
+  </div>
+  <div class="header-right">
+    <div class="hibernate-countdown" id="hibernateCountdown">--</div>
+    <div class="status-badge online" id="wifiStatus">STA · smartwater.local</div>
+  </div>
+</header>
+
+<main>
+
+  <!-- ── Temperature Monitor ── -->
+  <div class="section-divider">Monitor</div>
+
+  <div class="card">
+    <div class="temp-row">
+      <div class="temp-cell">
+        <div class="temp-label">Temperatura atual</div>
+        <div class="temp-value hot" id="currentTemp">--<span>°C</span></div>
+        <div class="temp-sub" id="tempStatus">Aquecendo...</div>
+      </div>
+      <div class="temp-cell">
+        <div class="temp-label">Setpoint ativo</div>
+        <div class="temp-value" id="activeSetpoint">--<span>°C</span></div>
+        <div class="temp-sub" id="setpointName">--</div>
+      </div>
+      <div class="temp-cell">
+        <div class="temp-label">Uptime</div>
+        <div class="temp-value" style="font-size:28px" id="uptimeDisplay">--</div>
+        <div class="temp-sub" id="heatingState">--</div>
+      </div>
+    </div>
+
+    <div class="card-body" style="padding-bottom:0">
+      <div class="chart-wrap">
+        <canvas id="tempChart"></canvas>
+      </div>
+    </div>
+
+    <div class="pid-row">
+      <div class="pid-label">Saída PID</div>
+      <div class="pid-bar-wrap">
+        <div class="pid-bar" id="pidBar" style="width:0%"></div>
+      </div>
+      <div class="pid-val" id="pidVal">0/255</div>
+    </div>
+  </div>
+
+  <!-- ── Setpoints ── -->
+  <div class="section-divider">Setpoints</div>
+
+  <div class="setpoint-grid">
+    <div class="sp-card">
+      <div class="sp-name">Café / Chá</div>
+      <div class="sp-temp-display" id="coffeeDisplay">75<span>°C</span></div>
+      <div class="sp-slider-row">
+        <input type="range" id="coffeeSlider" min="50" max="90" value="75"
+               oninput="updateSlider('coffee', this.value)">
+      </div>
+      <div class="sp-limits"><span>50°C</span><span>90°C</span></div>
+      <div class="form-actions">
+        <button class="btn btn-primary" onclick="saveSetpoint('coffee')">Salvar</button>
+      </div>
+    </div>
+
+    <div class="sp-card">
+      <div class="sp-name">Fervura</div>
+      <div class="sp-temp-display" id="boilingDisplay">100<span>°C</span></div>
+      <div class="sp-slider-row">
+        <input type="range" id="boilingSlider" min="90" max="115" value="100"
+               oninput="updateSlider('boiling', this.value)">
+      </div>
+      <div class="sp-limits"><span>90°C</span><span>115°C</span></div>
+      <div class="form-actions">
+        <button class="btn btn-primary" onclick="saveSetpoint('boiling')">Salvar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── WiFi Config ── -->
+  <div class="section-divider">Rede WiFi</div>
+
+  <div class="card">
+    <div class="card-header">
+      <div class="card-title">Credenciais</div>
+      <div class="status-badge online" id="wifiDetailStatus">Conectado</div>
+    </div>
+    <div class="card-body">
+      <div class="form-row" style="margin-bottom:16px">
+        <div class="form-group">
+          <label class="form-label">SSID</label>
+          <input class="form-input" type="text" id="wifiSsid" placeholder="Nome da rede">
+        </div>
+        <div class="form-group">
+          <label class="form-label">Senha</label>
+          <input class="form-input" type="password" id="wifiPass" placeholder="Mínimo 8 caracteres" minlength="8">
+        </div>
+      </div>
+      <div class="form-actions">
+        <button class="btn btn-secondary" onclick="clearWifiForm()">Limpar</button>
+        <button class="btn btn-primary" onclick="saveWifi()">Salvar e reiniciar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Maintenance Panel (collapsible) ── -->
+  <button class="maint-toggle" id="maintToggle" onclick="toggleMaint()">
+    <span>⚙ Manutenção</span>
+    <span class="chevron">▼</span>
+  </button>
+
+  <div class="maint-body" id="maintBody">
+
+    <!-- PID Constants -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">Constantes PID</div>
+        <div class="status-badge" style="color:var(--accent2);border-color:var(--accent2)">Avançado</div>
+      </div>
+      <div class="card-body">
+        <div class="pid-grid" style="margin-bottom:20px">
+          <div class="pid-input-wrap">
+            <div class="pid-const-label">Kp <span id="kpVal">12.00</span></div>
+            <input type="range" id="kpSlider" min="0" max="50" step="0.5" value="12"
+                   oninput="updatePidSlider('kp', this.value)">
+            <div class="sp-limits"><span>0</span><span>50</span></div>
+          </div>
+          <div class="pid-input-wrap">
+            <div class="pid-const-label">Ki <span id="kiVal">0.0004</span></div>
+            <input type="range" id="kiSlider" min="0" max="0.01" step="0.0001" value="0.0004"
+                   oninput="updatePidSlider('ki', this.value)">
+            <div class="sp-limits"><span>0</span><span>0.01</span></div>
+          </div>
+          <div class="pid-input-wrap">
+            <div class="pid-const-label">Kd <span id="kdVal">40.00</span></div>
+            <input type="range" id="kdSlider" min="0" max="100" step="1" value="40"
+                   oninput="updatePidSlider('kd', this.value)">
+            <div class="sp-limits"><span>0</span><span>100</span></div>
+          </div>
+        </div>
+        <div class="form-actions">
+          <button class="btn btn-secondary" onclick="resetPid()">Restaurar padrões</button>
+          <button class="btn btn-primary" onclick="savePid()">Aplicar</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- Hibernate Timeout -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">Hibernação automática</div>
+        <div class="hibernate-countdown" id="hibernateCountdownMaint" style="font-size:12px">--</div>
+      </div>
+      <div class="card-body">
+        <div class="pid-input-wrap" style="margin-bottom:20px">
+          <div class="pid-const-label">Timeout <span id="hibernateVal">5</span> min</div>
+          <input type="range" id="hibernateSlider" min="1" max="120" step="1" value="5"
+                 oninput="updateHibernateSlider(this.value)">
+          <div class="sp-limits"><span>1 min</span><span>120 min</span></div>
+        </div>
+        <div class="form-actions">
+          <button class="btn btn-primary" onclick="saveHibernate()">Salvar</button>
+        </div>
+      </div>
+    </div>
+
+    <!-- OTA Update -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">Atualização de Firmware</div>
+        <div class="status-badge online" id="otaVersionBadge">v1.0.0</div>
+      </div>
+      <div class="card-body">
+        <div class="ota-drop" id="otaDrop">
+          <input type="file" id="otaFile" accept=".bin" onchange="handleFileSelect(this)">
+          <div class="ota-icon">⬆</div>
+          <div class="ota-text">
+            Arraste o arquivo <strong>.bin</strong> aqui<br>
+            ou clique para selecionar
+          </div>
+        </div>
+        <div class="ota-progress" id="otaProgress">
+          <div class="progress-label">
+            <span id="otaFileName">firmware.bin</span>
+            <span id="otaPercent">0%</span>
+          </div>
+          <div class="progress-bar-wrap">
+            <div class="progress-bar" id="otaBar"></div>
+          </div>
+          <div class="form-actions" style="padding-top:0">
+            <button class="btn btn-secondary" onclick="cancelOta()">Cancelar</button>
+            <button class="btn btn-danger" id="otaUploadBtn" onclick="startOta()">Instalar firmware</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- System Info -->
+    <div class="info-grid">
+      <div class="info-cell">
+        <div class="info-key">IP</div>
+        <div class="info-val" id="sysIp">--</div>
+      </div>
+      <div class="info-cell">
+        <div class="info-key">Free heap</div>
+        <div class="info-val" id="sysHeap">--</div>
+      </div>
+      <div class="info-cell">
+        <div class="info-key">Firmware</div>
+        <div class="info-val" id="sysFw">--</div>
+      </div>
+      <div class="info-cell">
+        <div class="info-key">Modo WiFi</div>
+        <div class="info-val" id="sysMode">--</div>
+      </div>
+      <div class="info-cell">
+        <div class="info-key">RSSI</div>
+        <div class="info-val" id="sysRssi">--</div>
+      </div>
+      <div class="info-cell">
+        <div class="info-key">Chip</div>
+        <div class="info-val" id="sysChip">ESP32</div>
+      </div>
+    </div>
+
+  </div><!-- /maint-body -->
+
+</main>
+
+<!-- ── PID confirmation modal ── -->
+<div class="modal-backdrop" id="pidModal">
+  <div class="modal">
+    <div class="modal-title">⚠ Confirmar alteração</div>
+    <div class="modal-body">
+      <strong>Valores incorretos podem fazer com que o controle de temperatura pare de funcionar corretamente.</strong>
+      <br><br>
+      Confirma a aplicação das seguintes constantes?
+    </div>
+    <div class="modal-values" id="pidModalValues">--</div>
+    <div class="modal-actions">
+      <button class="btn btn-secondary" onclick="closePidModal()">Cancelar</button>
+      <button class="btn btn-danger" onclick="confirmPid()">Confirmar</button>
+    </div>
+  </div>
+</div>
+
+<div id="toast"></div>
+
+<!-- Chart.js — served from SPIFFS -->
+<script src="/chart.umd.min.js"></script>
+
+<script>
+// ── Constants ─────────────────────────────────────────────
+const PID_DEFAULTS = { kp: 12.0, ki: 0.0004, kd: 40.0 };
+
+// ── Chart state ───────────────────────────────────────────
+let chartLabels = [];
+let chartData   = [];
+
+const ctx = document.getElementById('tempChart').getContext('2d');
+const chart = new Chart(ctx, {
+  type: 'line',
+  data: {
+    labels: chartLabels,
+    datasets: [
+      {
+        label: 'Temperatura',
+        data: chartData,
+        borderColor: '#e8773a',
+        borderWidth: 1.5,
+        pointRadius: 0,
+        tension: 0.4,
+        fill: true,
+        backgroundColor: (ctx) => {
+          const g = ctx.chart.ctx.createLinearGradient(0, 0, 0, 200);
+          g.addColorStop(0, 'rgba(232,119,58,0.18)');
+          g.addColorStop(1, 'rgba(232,119,58,0.00)');
+          return g;
+        },
+      },
+      {
+        label: 'Setpoint',
+        data: [],
+        borderColor: '#3ab8e8',
+        borderWidth: 1,
+        borderDash: [4, 4],
+        pointRadius: 0,
+        tension: 0,
+        fill: false,
+      }
+    ]
+  },
+  options: {
+    responsive: true,
+    maintainAspectRatio: false,
+    animation: false,
+    interaction: { mode: 'index', intersect: false },
+    plugins: {
+      legend: { display: false },
+      tooltip: {
+        backgroundColor: '#141720',
+        borderColor: '#1e2330',
+        borderWidth: 1,
+        titleColor: '#5a6070',
+        bodyColor: '#e8e6e0',
+        titleFont: { family: "'DM Mono', monospace", size: 10 },
+        bodyFont:  { family: "'DM Mono', monospace", size: 12 },
+        callbacks: {
+          label: (ctx) => ` ${ctx.dataset.label}: ${ctx.parsed.y.toFixed(1)}°C`
+        }
+      }
+    },
+    scales: {
+      x: {
+        grid:  { color: '#1e2330', lineWidth: 0.5 },
+        ticks: { color: '#5a6070', font: { family: "'DM Mono', monospace", size: 10 }, maxTicksLimit: 8 },
+        border: { color: '#1e2330' }
+      },
+      y: {
+        grid:  { color: '#1e2330', lineWidth: 0.5 },
+        ticks: { color: '#5a6070', font: { family: "'DM Mono', monospace", size: 10 },
+                 callback: v => v + '°C' },
+        border: { color: '#1e2330' },
+        min: 20, max: 120,
+      }
+    }
+  }
+});
+
+// ── Helpers ───────────────────────────────────────────────
+function fmtUptime(s) {
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+  return `${String(h).padStart(2,'0')}:${String(m).padStart(2,'0')}:${String(sec).padStart(2,'0')}`;
+}
+
+function fmtCountdown(s) {
+  if (s <= 0) return 'hibernando';
+  const m = Math.floor(s / 60), sec = s % 60;
+  return `hibernação em ${m}:${String(sec).padStart(2,'0')}`;
+}
+
+function toast(msg, type = '') {
+  const t = document.getElementById('toast');
+  t.textContent = msg;
+  t.className = 'show ' + type;
+  clearTimeout(t._timer);
+  t._timer = setTimeout(() => t.className = '', 3000);
+}
+
+// ── Apply status from /api/status ─────────────────────────
+function applyStatus(s) {
+  document.getElementById('currentTemp').textContent    = s.temp + '°C';
+  document.getElementById('activeSetpoint').textContent = s.setpoint + '°C';
+  document.getElementById('setpointName').textContent   = s.sp_name || '--';
+  document.getElementById('uptimeDisplay').textContent  = fmtUptime(s.uptime);
+  document.getElementById('heatingState').textContent   = s.heating ? 'Aquecendo' : 'Em espera';
+  document.getElementById('tempStatus').textContent     =
+    s.temp >= s.setpoint - 1 ? 'Na temperatura' : 'Aquecendo...';
+
+  const cv = document.getElementById('currentTemp');
+  cv.className = 'temp-value ' + (s.temp > 60 ? 'hot' : s.temp < 35 ? 'cold' : '');
+
+  const pct = ((s.pid / 255) * 100).toFixed(0);
+  document.getElementById('pidBar').style.width = pct + '%';
+  document.getElementById('pidVal').textContent  = s.pid + '/255';
+
+  document.getElementById('sysIp').textContent   = s.ip        || '--';
+  document.getElementById('sysHeap').textContent = s.heap      || '--';
+  document.getElementById('sysFw').textContent   = s.fw        || '--';
+  document.getElementById('sysMode').textContent = s.wifi_mode || '--';
+  document.getElementById('sysRssi').textContent = s.rssi ? s.rssi + ' dBm' : '--';
+  document.getElementById('otaVersionBadge').textContent = s.fw || '--';
+
+  const badge = document.getElementById('wifiStatus');
+  if (s.wifi_mode === 'STA') {
+    badge.className   = 'status-badge online';
+    badge.textContent = 'STA · smartwater.local';
+  } else {
+    badge.className   = 'status-badge ap';
+    badge.textContent = 'AP · 192.168.4.1';
+  }
+
+  const rem = (s.hibernate_remaining != null) ? s.hibernate_remaining : null;
+  if (rem !== null) {
+    const txt  = fmtCountdown(rem);
+    const warn = rem < 120;
+    ['hibernateCountdown', 'hibernateCountdownMaint'].forEach(id => {
+      const el = document.getElementById(id);
+      el.textContent = txt;
+      el.classList.toggle('warning', warn);
+    });
+  }
+
+  const now = new Date().toLocaleTimeString('pt-BR',
+    { hour: '2-digit', minute: '2-digit', second: '2-digit' });
+  chartLabels.push(now);
+  chartData.push(s.temp);
+  chart.data.datasets[1].data.push(s.setpoint);
+  if (chartLabels.length > 300) {
+    chartLabels.shift();
+    chartData.shift();
+    chart.data.datasets[1].data.shift();
+  }
+  chart.update('none');
+}
+
+// ── Poll /api/status every second ────────────────────────
+async function poll() {
+  try {
+    const r = await fetch('/api/status');
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    applyStatus(await r.json());
+  } catch {
+    const badge = document.getElementById('wifiStatus');
+    badge.className   = 'status-badge offline';
+    badge.textContent = 'Sem conexão';
+  }
+}
+
+setInterval(poll, 1000);
+
+// ── Load history on page open ─────────────────────────────
+async function loadHistory() {
+  try {
+    const r = await fetch('/api/history');
+    if (!r.ok) return;
+    const h = await r.json();
+    const labels = h.labels.map(s => {
+      const d = new Date(s * 1000);
+      return d.toISOString().substr(11, 8);
+    });
+    chartLabels.push(...labels);
+    chartData.push(...h.temps);
+    chart.data.datasets[1].data.push(...h.setpoints);
+    chart.update('none');
+  } catch { /* silent — poll fills in */ }
+  poll();
+}
+
+loadHistory();
+
+// ── Load persisted config into sliders on page open ───────
+async function loadConfig() {
+  try {
+    const r = await fetch('/api/config');
+    if (!r.ok) return;
+    const c = await r.json();
+
+    if (c.coffee_setpoint != null) {
+      document.getElementById('coffeeSlider').value = c.coffee_setpoint;
+      document.getElementById('coffeeDisplay').innerHTML =
+        parseFloat(c.coffee_setpoint).toFixed(0) + '<span>°C</span>';
+    }
+    if (c.boiling_setpoint != null) {
+      document.getElementById('boilingSlider').value = c.boiling_setpoint;
+      document.getElementById('boilingDisplay').innerHTML =
+        parseFloat(c.boiling_setpoint).toFixed(0) + '<span>°C</span>';
+    }
+    if (c.kp != null) {
+      document.getElementById('kpSlider').value = c.kp;
+      document.getElementById('kpVal').textContent = parseFloat(c.kp).toFixed(2);
+    }
+    if (c.ki != null) {
+      document.getElementById('kiSlider').value = c.ki;
+      document.getElementById('kiVal').textContent = parseFloat(c.ki).toFixed(4);
+    }
+    if (c.kd != null) {
+      document.getElementById('kdSlider').value = c.kd;
+      document.getElementById('kdVal').textContent = parseFloat(c.kd).toFixed(2);
+    }
+    if (c.hibernate_timeout_min != null) {
+      document.getElementById('hibernateSlider').value = c.hibernate_timeout_min;
+      document.getElementById('hibernateVal').textContent = c.hibernate_timeout_min;
+    }
+  } catch { /* silent — sliders keep HTML defaults */ }
+}
+
+loadConfig();
+
+// ── Setpoint sliders ──────────────────────────────────────
+function updateSlider(which, val) {
+  document.getElementById(which + 'Display').innerHTML = val + '<span>°C</span>';
+}
+
+async function saveSetpoint(which) {
+  const val = document.getElementById(which + 'Slider').value;
+  try {
+    const r = await fetch('/api/config', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ [which + '_setpoint']: parseFloat(val) })
+    });
+    if (r.ok) toast('Setpoint salvo: ' + val + '°C', 'success');
+    else      toast('Erro ao salvar', 'error');
+  } catch { toast('Erro de conexão', 'error'); }
+}
+
+// ── WiFi form ─────────────────────────────────────────────
+function clearWifiForm() {
+  document.getElementById('wifiSsid').value = '';
+  document.getElementById('wifiPass').value = '';
+}
+
+async function saveWifi() {
+  const ssid = document.getElementById('wifiSsid').value.trim();
+  const pass = document.getElementById('wifiPass').value;
+  if (!ssid)           { toast('Informe o SSID', 'error'); return; }
+  if (pass.length < 8) { toast('Senha deve ter mínimo 8 caracteres', 'error'); return; }
+  try {
+    const r = await fetch('/api/wifi', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ ssid, password: pass })
+    });
+    if (r.ok) toast('Credenciais salvas — reiniciando...', 'success');
+    else      toast('Erro ao salvar WiFi', 'error');
+  } catch { toast('Erro de conexão', 'error'); }
+}
+
+// ── Maintenance panel ─────────────────────────────────────
+function toggleMaint() {
+  document.getElementById('maintToggle').classList.toggle('open');
+  document.getElementById('maintBody').classList.toggle('open');
+}
+
+// ── PID constants ─────────────────────────────────────────
+function updatePidSlider(which, val) {
+  const fmt = which === 'ki' ? parseFloat(val).toFixed(4) : parseFloat(val).toFixed(2);
+  document.getElementById(which + 'Val').textContent = fmt;
+}
+
+function resetPid() {
+  document.getElementById('kpSlider').value = PID_DEFAULTS.kp;
+  document.getElementById('kiSlider').value = PID_DEFAULTS.ki;
+  document.getElementById('kdSlider').value = PID_DEFAULTS.kd;
+  updatePidSlider('kp', PID_DEFAULTS.kp);
+  updatePidSlider('ki', PID_DEFAULTS.ki);
+  updatePidSlider('kd', PID_DEFAULTS.kd);
+  toast('Valores restaurados — clique Aplicar para salvar');
+}
+
+async function savePid() {
+  const kp = parseFloat(document.getElementById('kpSlider').value);
+  const ki = parseFloat(document.getElementById('kiSlider').value);
+  const kd = parseFloat(document.getElementById('kdSlider').value);
+  document.getElementById('pidModalValues').textContent =
+    `Kp: ${kp.toFixed(2)}   Ki: ${ki.toFixed(4)}   Kd: ${kd.toFixed(2)}`;
+  document.getElementById('pidModal').classList.add('open');
+}
+
+function closePidModal() {
+  document.getElementById('pidModal').classList.remove('open');
+}
+
+async function confirmPid() {
+  closePidModal();
+  const kp = parseFloat(document.getElementById('kpSlider').value);
+  const ki = parseFloat(document.getElementById('kiSlider').value);
+  const kd = parseFloat(document.getElementById('kdSlider').value);
+  try {
+    const r = await fetch('/api/config', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ kp, ki, kd })
+    });
+    if (r.ok) toast('Constantes PID aplicadas', 'success');
+    else      toast('Erro ao salvar PID', 'error');
+  } catch { toast('Erro de conexão', 'error'); }
+}
+
+document.getElementById('pidModal').addEventListener('click', function(e) {
+  if (e.target === this) closePidModal();
+});
+
+// ── Hibernate timeout ─────────────────────────────────────
+function updateHibernateSlider(val) {
+  document.getElementById('hibernateVal').textContent = val;
+}
+
+async function saveHibernate() {
+  const min = parseInt(document.getElementById('hibernateSlider').value);
+  try {
+    const r = await fetch('/api/config', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ hibernate_timeout_min: min })
+    });
+    if (r.ok) toast('Timeout salvo: ' + min + ' min', 'success');
+    else      toast('Erro ao salvar', 'error');
+  } catch { toast('Erro de conexão', 'error'); }
+}
+
+// ── OTA ───────────────────────────────────────────────────
+let selectedFile = null;
+
+const drop = document.getElementById('otaDrop');
+drop.addEventListener('dragover',  e => { e.preventDefault(); drop.classList.add('drag-over'); });
+drop.addEventListener('dragleave', () => drop.classList.remove('drag-over'));
+drop.addEventListener('drop', e => {
+  e.preventDefault();
+  drop.classList.remove('drag-over');
+  const f = e.dataTransfer.files[0];
+  if (f && f.name.endsWith('.bin')) setOtaFile(f);
+  else toast('Selecione um arquivo .bin', 'error');
+});
+
+function handleFileSelect(input) {
+  if (input.files[0]) setOtaFile(input.files[0]);
+}
+
+function setOtaFile(f) {
+  selectedFile = f;
+  document.getElementById('otaFileName').textContent = f.name;
+  document.getElementById('otaProgress').classList.add('visible');
+  document.getElementById('otaPercent').textContent = '0%';
+  document.getElementById('otaBar').style.width = '0%';
+}
+
+function cancelOta() {
+  selectedFile = null;
+  document.getElementById('otaProgress').classList.remove('visible');
+  document.getElementById('otaFile').value = '';
+}
+
+async function startOta() {
+  if (!selectedFile) { toast('Nenhum arquivo selecionado', 'error'); return; }
+  const btn = document.getElementById('otaUploadBtn');
+  btn.disabled = true;
+  try {
+    const fd = new FormData();
+    fd.append('firmware', selectedFile);
+    const xhr = new XMLHttpRequest();
+    xhr.open('POST', '/api/ota');
+    xhr.upload.onprogress = e => {
+      if (e.lengthComputable) {
+        const p = ((e.loaded / e.total) * 100).toFixed(0);
+        document.getElementById('otaBar').style.width     = p + '%';
+        document.getElementById('otaPercent').textContent = p + '%';
+      }
+    };
+    xhr.onload = () => {
+      if (xhr.status === 200) toast('Firmware instalado — reiniciando...', 'success');
+      else                    toast('Erro no OTA: ' + xhr.status, 'error');
+      btn.disabled = false;
+    };
+    xhr.onerror = () => { toast('Erro de conexão', 'error'); btn.disabled = false; };
+    xhr.send(fd);
+  } catch { toast('Erro ao enviar firmware', 'error'); btn.disabled = false; }
+}
+</script>
+</body>
+</html>

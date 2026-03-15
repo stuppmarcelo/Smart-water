@@ -22,6 +22,8 @@
 #include "math.h"
 
 #include "wifi_manager.h"
+#include "webserver.h"
+#include "esp_spiffs.h"
 
 // ─────────────────────────────────────────────
 // Pin / channel definitions
@@ -38,7 +40,7 @@
 
 #define TIME_CONTROL_INTERVAL 250   // ms — PID loop period
 #define TIME_ADC_INTERVAL      50   // ms — temperature sampling period
-#define MAX_TIMER_ON       300000   // ms — max allowed on-time before auto shut-off
+#define MAX_TIMER_BTN_ON   300000   // ms — max allowed for the button
 
 // ─────────────────────────────────────────────
 // NTC / temperature
@@ -50,26 +52,21 @@
 #define SERIE_RESISTOR  10000.0f   // fixed resistor in voltage divider
 #define FACTORADC       0.01f      // low-pass filter coefficient
 
-// ─────────────────────────────────────────────
-// PID gains
-// ─────────────────────────────────────────────
-
-#define KP  12.00f
-#define KI   0.0004f
-#define KD  40.00f
+// PID gains — initial values only.
+// At runtime read from g_ws_config (protected by xTempMutex).
+// Defaults mirror g_ws_config initialisation in webserver.c.
 
 // ─────────────────────────────────────────────
 // Setpoints
 // ─────────────────────────────────────────────
 
-const float coffeeSetpoint  = 75.0f;
-const float boilingSetpoint = 100.0f;  
+// Setpoints — initial values only, runtime values live in g_ws_config.
 
 // ─────────────────────────────────────────────
 // Shared state (protected by xTempMutex)
 // ─────────────────────────────────────────────
 
-float setpoint  = 80.0f;
+float setpoint  = 75.0f;
 float waterTemp = 25.0f;
 SemaphoreHandle_t xTempMutex = NULL;
 
@@ -114,6 +111,7 @@ static const char *TAG_TEMP = "temperature";
 static const char *TAG_CTRL = "control";
 static const char *TAG_PW   = "out_power";
 static const char *TAG_BTN  = "button";
+static const char *TAG_TEL  = "telemetry";
 
 // ─────────────────────────────────────────────
 // ISR — zero crossing
@@ -216,17 +214,26 @@ void logic_control_task(void *arg)
     while (1) {
         esp_task_wdt_reset();
 
-        // --- Read shared state under mutex ---
-        float localTemp     = 25.0f;
-        float localSetpoint = 80.0f;
+        // --- Read all shared state under mutex ---
+        float localTemp          = 25.0f;
+        float localSetpoint      = 80.0f;
+        float localCoffeeSp      = 75.0f;
+        float localBoilingSp     = 100.0f;
+        float kp = 12.0f, ki = 0.0004f, kd = 40.0f;
+
         if (xSemaphoreTake(xTempMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-            localTemp     = waterTemp;
-            localSetpoint = setpoint;
+            localTemp        = waterTemp;
+            localSetpoint    = setpoint;
+            localCoffeeSp    = g_ws_config.coffee_setpoint;
+            localBoilingSp   = g_ws_config.boiling_setpoint;
+            kp               = g_ws_config.kp;
+            ki               = g_ws_config.ki;
+            kd               = g_ws_config.kd;
             xSemaphoreGive(xTempMutex);
         }
 
         // --- Button debounce ---
-        if (timerBtn < MAX_TIMER_ON) {
+        if (timerBtn < MAX_TIMER_BTN_ON) {
             if (!gpio_get_level(IN_BTN)) {
                 vTaskDelay(pdMS_TO_TICKS(1));
                 commandBtn = !gpio_get_level(IN_BTN);
@@ -237,12 +244,12 @@ void logic_control_task(void *arg)
 
             // Short press → boiling setpoint
             if (lastTimeBtn > 10 && lastTimeBtn < 100 && commandBtn) {
-                localSetpoint = boilingSetpoint;
+                localSetpoint = localBoilingSp;
                 lastTimeBtn   = 0;
                 oldEr = localSetpoint - localTemp;
             }
 
-            if (!commandBtn) localSetpoint = coffeeSetpoint;
+            if (!commandBtn) localSetpoint = localCoffeeSp;
 
         } else {
             heatError = true;
@@ -256,22 +263,25 @@ void logic_control_task(void *arg)
         // --- PID ---
         if (!commandBtn) {
             PID = 0;
+            if (xSemaphoreTake(xTempMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                setpoint = localCoffeeSp;
+                xSemaphoreGive(xTempMutex);
+            }
             vTaskDelay(pdMS_TO_TICKS(TIME_CONTROL_INTERVAL * 2));
-            ESP_LOGD(TAG_CTRL, "Btn off — skipping PID");
             continue;
         }
 
         er = localSetpoint - localTemp;
 
-        p = er * KP;
+        p = er * kp;
         if (p >  255.0f) p =  255.0f;
         else if (p < -255.0f) p = -255.0f;
 
-        i += er * KI;
+        i += er * ki;
         if (i >  255.0f) i =  255.0f;
         else if (i < -255.0f) i = -255.0f;
 
-        d = (er - oldEr) * KD;
+        d = (er - oldEr) * kd;
         if (d >  255.0f) d =  255.0f;
         else if (d < -255.0f) d = -255.0f;
 
@@ -280,6 +290,12 @@ void logic_control_task(void *arg)
         PID = (int16_t)(p + i + d);
         if      (PID <  20) PID = 0;
         else if (PID > 255) PID = 255;
+
+        // Write setpoint back under mutex so telemetry task sees the active value
+        if (xSemaphoreTake(xTempMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+            setpoint = localSetpoint;
+            xSemaphoreGive(xTempMutex);
+        }
 
         ESP_LOGD(TAG_CTRL, "Temp %.2f  SP %.2f  PID %d", localTemp, localSetpoint, PID);
         vTaskDelay(pdMS_TO_TICKS(TIME_CONTROL_INTERVAL));
@@ -335,7 +351,9 @@ void temperature_task(void *arg)
 
 // ─────────────────────────────────────────────
 // Task: aux
-// Button hold timer. Auto shut-off after MAX_TIMER_ON ms.
+// Button hold timer + configurable auto-hibernate.
+// Hibernate timeout is stored in g_ws_config.hibernate_timeout_ms
+// and can be updated via the webserver (future).
 // ─────────────────────────────────────────────
 
 void aux_task(void *arg)
@@ -343,6 +361,8 @@ void aux_task(void *arg)
     while (1) {
         if (commandBtn) {
             timerBtn++;
+            // User is active — reset the hibernate countdown
+            // (timerBtn is in 10 ms ticks, MAX_TIMER_ON is in ms)
         } else {
             if (timerBtn) {
                 lastTimeBtn = timerBtn;
@@ -351,11 +371,24 @@ void aux_task(void *arg)
             }
         }
 
-        // Safety: auto shut-off after MAX_TIMER_ON ms
-        if ((esp_timer_get_time() / 1000) > MAX_TIMER_ON) {
+        // --- Auto-hibernate after configurable timeout ---
+        uint32_t elapsed_ms = (uint32_t)(esp_timer_get_time() / 1000ULL);
+        uint32_t timeout_ms = g_ws_config.hibernate_timeout_ms;
+
+        if (elapsed_ms >= timeout_ms) {
+            ESP_LOGW(TAG_BTN, "Hibernate timeout reached (%lu ms) — shutting down",
+                     (unsigned long)timeout_ms);
+
+            // Guarantee output is off before sleeping
             gpio_set_level(OUT_POWER, 0);
-            ESP_LOGW(TAG_BTN, "Max on-time reached — going to deep sleep");
+            heatError = true;   // stops power_control_task loop
+
+            // Brief delay so webserver can serve one last status update
+            vTaskDelay(pdMS_TO_TICKS(1000));
+
+            ESP_LOGI(TAG_BTN, "Entering deep sleep");
             esp_deep_sleep_start();
+            // No return
         }
 
         vTaskDelay(pdMS_TO_TICKS(10));
@@ -363,8 +396,34 @@ void aux_task(void *arg)
 }
 
 // ─────────────────────────────────────────────
-// GPIO setup
+// Task: telemetry
+// Samples waterTemp + setpoint + PID every HISTORY_INTERVAL_MS
+// and pushes to the webserver history buffer.
 // ─────────────────────────────────────────────
+
+static void telemetry_task(void *arg)
+{
+    ESP_LOGI(TAG_TEL, "Telemetry task started");
+
+    while (1) {
+        float   localTemp     = 0.0f;
+        float   localSetpoint = 0.0f;
+        int16_t localPid      = 0;
+
+        if (xSemaphoreTake(xTempMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+            localTemp     = waterTemp;
+            localSetpoint = setpoint;
+            xSemaphoreGive(xTempMutex);
+        }
+
+        localPid = PID;  // volatile int16_t — atomic read on ESP32, no mutex needed
+
+        webserver_history_push(localTemp, localSetpoint, localPid,
+                               localPid > 0 && !heatError);
+
+        vTaskDelay(pdMS_TO_TICKS(HISTORY_INTERVAL_MS));
+    }
+}
 
 static void gpio_setup(void)
 {
@@ -472,32 +531,53 @@ void app_main(void)
     xTempMutex = xSemaphoreCreateMutex();
     configASSERT(xTempMutex);
 
-    // 3. Control tasks — start before WiFi so heating works even offline
+    // 3. NVS — must come before WiFi and config load
+    ESP_ERROR_CHECK(nvs_flash_init());
+
+    // 4. Load persisted config from NVS into g_ws_config
+    //    (setpoints, PID gains, hibernate timeout)
+    webserver_config_load_nvs();
+
+    // 5. Mount SPIFFS — must come before webserver_start() inside wifi_manager_init()
+    esp_vfs_spiffs_conf_t spiffs_cfg = {
+        .base_path              = "/spiffs",
+        .partition_label        = NULL,   // first SPIFFS partition in table
+        .max_files              = 4,
+        .format_if_mount_failed = false,
+    };
+    esp_err_t spiffs_err = esp_vfs_spiffs_register(&spiffs_cfg);
+    if (spiffs_err != ESP_OK) {
+        ESP_LOGE("SPIFFS", "Mount failed (%s) — webserver will return 500 for static files",
+                 esp_err_to_name(spiffs_err));
+    } else {
+        size_t total = 0, used = 0;
+        esp_spiffs_info(NULL, &total, &used);
+        ESP_LOGI("SPIFFS", "Mounted — %d KB used / %d KB total",
+                 (int)(used / 1024), (int)(total / 1024));
+    }
+
+    // 6. Control tasks — start before WiFi so heating works even offline
     xTaskCreate(logic_control_task, "logic_control", 4096, NULL, 3, NULL);
     xTaskCreate(power_control_task, "power_control", 4096, NULL, 5, NULL);
     xTaskCreate(temperature_task,   "temperature",   4096, NULL, 5, NULL);
     xTaskCreatePinnedToCore(aux_task, "aux", 4096, NULL, 1, NULL, 1);
+    xTaskCreate(telemetry_task, "telemetry", 3072, NULL, 2, NULL);
 
-    // 4. NVS — must come before WiFi
-    ESP_ERROR_CHECK(nvs_flash_init());
-
-    // 5. Network infrastructure — initialised once here, not inside wifi_manager
+    // 7. Network infrastructure — initialised once here, not inside wifi_manager
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    // 6. WiFi: STA (from NVS) or AP fallback + mDNS
+    // 8. WiFi: STA (from NVS) or AP fallback + mDNS + webserver
     wifi_manager_init();
 
-    // 7. NTP — only useful in STA mode, harmless in AP mode (will time out quietly)
+    // 9. NTP — only useful in STA mode, harmless in AP mode (will time out quietly)
     if (wifi_manager_get_mode() == WIFI_MODE_STA_CONNECTED) {
         sync_time();
     }
 
-    // 8. Mark OTA partition valid (cancel rollback timer)
+    // 10. Mark OTA partition valid (cancel rollback timer)
     esp_err_t err = esp_ota_mark_app_valid_cancel_rollback();
     if (err != ESP_OK) {
         ESP_LOGE("OTA", "Failed to mark app valid: %s", esp_err_to_name(err));
     }
-
-    // 9. TODO: webserver_start() — next step
 }

@@ -10,6 +10,7 @@
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "mdns.h"
+#include "webserver.h"
 
 static const char *TAG = "wifi_manager";
 
@@ -57,9 +58,7 @@ esp_err_t wifi_manager_save_credentials(const char *ssid, const char *password)
     nvs_close(handle);
 
     if (err == ESP_OK) {
-        ESP_LOGI(TAG, "Credentials saved — rebooting");
-        vTaskDelay(pdMS_TO_TICKS(300));
-        esp_restart();
+        ESP_LOGI(TAG, "Credentials saved to NVS");
     }
 
     return err;
@@ -182,11 +181,13 @@ static void start_ap(void)
         },
     };
 
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP_ON));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap_config));
     ESP_ERROR_CHECK(esp_wifi_start());
 
     ESP_LOGI(TAG, "AP started — SSID: %s  IP: 192.168.4.1", WIFI_AP_SSID);
+
+    webserver_start();
 }
 
 // ─────────────────────────────────────────────
@@ -211,6 +212,7 @@ void wifi_manager_init(void)
     if (sta_ok) {
         s_current_mode = WIFI_MODE_STA_CONNECTED;
         mdns_start();
+        webserver_start();
     } else {
         start_ap();
         s_current_mode = WIFI_MODE_AP_ON;
