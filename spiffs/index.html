@@ -1066,8 +1066,7 @@ function applyStatus(s) {
   document.getElementById('setpointName').textContent   = s.sp_name || '--';
   document.getElementById('uptimeDisplay').textContent  = fmtUptime(s.uptime);
   document.getElementById('heatingState').textContent   = s.heating ? 'Aquecendo' : 'Em espera';
-  document.getElementById('tempStatus').textContent     =
-    s.temp >= s.setpoint - 1 ? 'Na temperatura' : 'Aquecendo...';
+  document.getElementById('tempStatus').textContent = s.pid !== 0 ? 'Aquecendo...' : 'Em espera';
 
   const cv = document.getElementById('currentTemp');
   cv.className = 'temp-value ' + (s.temp > 60 ? 'hot' : s.temp < 35 ? 'cold' : '');
@@ -1339,10 +1338,9 @@ async function startOta() {
   const btn = document.getElementById('otaUploadBtn');
   btn.disabled = true;
   try {
-    const fd = new FormData();
-    fd.append('firmware', selectedFile);
     const xhr = new XMLHttpRequest();
     xhr.open('POST', '/api/ota');
+    xhr.setRequestHeader('Content-Type', 'application/octet-stream');
     xhr.upload.onprogress = e => {
       if (e.lengthComputable) {
         const p = ((e.loaded / e.total) * 100).toFixed(0);
@@ -1356,7 +1354,7 @@ async function startOta() {
       btn.disabled = false;
     };
     xhr.onerror = () => { toast('Erro de conexão', 'error'); btn.disabled = false; };
-    xhr.send(fd);
+    xhr.send(selectedFile);
   } catch { toast('Erro ao enviar firmware', 'error'); btn.disabled = false; }
 }
 </script>

@@ -207,6 +207,7 @@ void logic_control_task(void *arg)
 {
     esp_task_wdt_add(NULL);
 
+    static bool isBoiling = false;
     static float oldEr = 0.0f;
     static float i     = 0.0f;
     float er = 0.0f, p = 0.0f, d = 0.0f;
@@ -244,12 +245,18 @@ void logic_control_task(void *arg)
 
             // Short press → boiling setpoint
             if (lastTimeBtn > 10 && lastTimeBtn < 100 && commandBtn) {
-                localSetpoint = localBoilingSp;
+                isBoiling = true;
                 lastTimeBtn   = 0;
-                oldEr = localSetpoint - localTemp;
             }
 
-            if (!commandBtn) localSetpoint = localCoffeeSp;
+            if (!commandBtn) isBoiling = false;
+
+            if (isBoiling) {
+                localSetpoint = localBoilingSp;
+            } else {
+                localSetpoint = localCoffeeSp;
+            }
+        
 
         } else {
             heatError = true;
