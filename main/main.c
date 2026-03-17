@@ -50,7 +50,7 @@
 #define REF_TEMP        298.15f     // 25 °C in Kelvin
 #define REF_RESISTANCE  10000.0f   // NTC resistance at REF_TEMP
 #define SERIE_RESISTOR  10000.0f   // fixed resistor in voltage divider
-#define FACTORADC       0.01f      // low-pass filter coefficient
+#define FACTORADC       0.05f      // low-pass filter coefficient
 
 // PID gains — initial values only.
 // At runtime read from g_ws_config (protected by xTempMutex).
@@ -121,7 +121,7 @@ static void IRAM_ATTR zero_cross_isr(void *arg)
 {
     isCrossing        = true;
     lastCrossedTime   = crossedTime;
-    crossedTime       = esp_timer_get_time() - 500;
+    crossedTime       = esp_timer_get_time() + 125; // Midle of opto windown
 
     BaseType_t xHigherPriorityTaskWoken = pdFALSE;
     xTaskNotifyFromISR(powerTaskHandle, 0, eNoAction, &xHigherPriorityTaskWoken);
@@ -200,7 +200,7 @@ void power_control_task(void *arg)
 
         // Guard: if the firing moment already passed, skip this cycle
         // instead of scheduling a timer for billions of microseconds
-        if (delay_us <= 1 || delay_us > 8300) continue;
+        if (delay_us <= 0 || delay_us > 8330) continue;
 
         esp_timer_stop(triac_timer);
         esp_timer_start_once(triac_timer, (uint64_t)delay_us);
@@ -352,7 +352,10 @@ void temperature_task(void *arg)
         float kTemperature       = 1.0f / (1.0f / REF_TEMP + (1.0f / BETA) * logf(ntcResistance / REF_RESISTANCE));
         float currentTemperature = kTemperature - 273.15f;
 
-        temp = (1.0f - FACTORADC) * temp + FACTORADC * currentTemperature;
+        if (temp == 25.0f) temp = currentTemperature; // Skip filter on first read
+        else {
+            temp = (1.0f - FACTORADC) * temp + FACTORADC * currentTemperature;
+        }
 
         if (xSemaphoreTake(xTempMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
             waterTemp = temp;
