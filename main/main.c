@@ -282,6 +282,22 @@ void logic_control_task(void *arg)
 
         // --- PID ---
         if (!commandBtn) {
+            // Check virtual heat override (web button substitute for physical button)
+            if (g_heat_override.active) {
+                // Auto-cancel when target is reached — works even if browser is closed
+                if (localTemp >= g_heat_override.target_temp) {
+                    g_heat_override.active = false;
+                    ESP_LOGI(TAG_CTRL, "Heat override: target %.1f°C reached — stopping",
+                             g_heat_override.target_temp);
+                } else {
+                    // Use the override setpoint and run PID normally (fall through below)
+                    localSetpoint = (g_heat_override.mode == HEAT_MODE_BOILING)
+                                    ? localBoilingSp
+                                    : localCoffeeSp;
+                    goto pid_compute;
+                }
+            }
+
             PID = 0;
             if (xSemaphoreTake(xTempMutex, pdMS_TO_TICKS(10)) == pdTRUE) {
                 setpoint = localCoffeeSp;
@@ -290,6 +306,8 @@ void logic_control_task(void *arg)
             vTaskDelay(pdMS_TO_TICKS(TIME_CONTROL_INTERVAL * 2));
             continue;
         }
+
+        pid_compute:
 
         er = localSetpoint - localTemp;
 

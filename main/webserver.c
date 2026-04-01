@@ -36,6 +36,7 @@ webserver_config_t g_ws_config  = {
 };
 webserver_status_t g_ws_status  = { 0 };
 wifi_pending_t     g_wifi_pending = { .pending = false };
+heat_override_t    g_heat_override = { .active = false, .mode = HEAT_MODE_COFFEE, .target_temp = 0.0f };
 
 // Mutex protecting g_history and g_ws_status from concurrent access
 // (push from telemetry task, reads from HTTP handlers)
@@ -49,6 +50,12 @@ static char *s_history_json_buf = NULL;
 // Scratch buffer for small JSON responses (status, config ACK, errors)
 #define JSON_SCRATCH_SIZE 512
 static char s_scratch[JSON_SCRATCH_SIZE];
+
+// HTTP server handle — kept so webserver_start() is idempotent
+static httpd_handle_t s_server = NULL;
+
+// Mutex protecting s_scratch from concurrent HTTP handler access
+static SemaphoreHandle_t s_scratch_mutex = NULL;
 
 // OTA write handle — kept across chunked POST /api/ota
 static esp_ota_handle_t s_ota_handle    = 0;
@@ -201,6 +208,7 @@ static esp_err_t handler_api_status(httpd_req_t *req)
     webserver_status_t snap = g_ws_status;   // copy under mutex
     xSemaphoreGive(s_history_mutex);
 
+    xSemaphoreTake(s_scratch_mutex, portMAX_DELAY);
     snprintf(s_scratch, sizeof(s_scratch),
         "{"
         "\"temp\":%.1f,"
@@ -232,7 +240,12 @@ static esp_err_t handler_api_status(httpd_req_t *req)
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
-    httpd_resp_sendstr(req, s_scratch);
+    // Copy out of scratch before releasing the mutex so the buffer is
+    // free for other handlers as quickly as possible.
+    char local_resp[JSON_SCRATCH_SIZE];
+    memcpy(local_resp, s_scratch, sizeof(local_resp));
+    xSemaphoreGive(s_scratch_mutex);
+    httpd_resp_sendstr(req, local_resp);
     return ESP_OK;
 }
 
@@ -306,6 +319,7 @@ static esp_err_t handler_api_history(httpd_req_t *req)
 
 static esp_err_t handler_api_config_get(httpd_req_t *req)
 {
+    xSemaphoreTake(s_scratch_mutex, portMAX_DELAY);
     snprintf(s_scratch, sizeof(s_scratch),
         "{"
         "\"coffee_setpoint\":%.1f,"
@@ -322,10 +336,13 @@ static esp_err_t handler_api_config_get(httpd_req_t *req)
         g_ws_config.kd,
         (unsigned long)(g_ws_config.hibernate_timeout_ms / 60000)
     );
+    char local_resp[JSON_SCRATCH_SIZE];
+    memcpy(local_resp, s_scratch, sizeof(local_resp));
+    xSemaphoreGive(s_scratch_mutex);
 
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-cache");
-    httpd_resp_sendstr(req, s_scratch);
+    httpd_resp_sendstr(req, local_resp);
     return ESP_OK;
 }
 
@@ -376,8 +393,10 @@ static esp_err_t handler_api_config(httpd_req_t *req)
         return ESP_FAIL;
     }
 
+    xSemaphoreTake(s_scratch_mutex, portMAX_DELAY);
     int received = httpd_req_recv(req, s_scratch, total);
     if (received <= 0) {
+        xSemaphoreGive(s_scratch_mutex);
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Recv error");
         return ESP_FAIL;
     }
@@ -406,6 +425,9 @@ static esp_err_t handler_api_config(httpd_req_t *req)
         && val >= 1.0f && val <= 120.0f) {
         g_ws_config.hibernate_timeout_ms = (uint32_t)(val * 60000.0f);
     }
+
+    // s_scratch fully parsed — release mutex before slow NVS operations
+    xSemaphoreGive(s_scratch_mutex);
 
     // Persist to NVS
     nvs_handle_t nvs;
@@ -439,8 +461,10 @@ static esp_err_t handler_api_wifi(httpd_req_t *req)
         return ESP_FAIL;
     }
 
+    xSemaphoreTake(s_scratch_mutex, portMAX_DELAY);
     int received = httpd_req_recv(req, s_scratch, total);
     if (received <= 0) {
+        xSemaphoreGive(s_scratch_mutex);
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Recv error");
         return ESP_FAIL;
     }
@@ -450,11 +474,13 @@ static esp_err_t handler_api_wifi(httpd_req_t *req)
     char pass[64] = {0};
 
     if (!json_get_string(s_scratch, "ssid", ssid, sizeof(ssid)) || strlen(ssid) == 0) {
+        xSemaphoreGive(s_scratch_mutex);
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing ssid");
         return ESP_FAIL;
     }
 
     json_get_string(s_scratch, "password", pass, sizeof(pass));
+    xSemaphoreGive(s_scratch_mutex);  // parsed everything needed from scratch
 
     if (strlen(pass) > 0 && strlen(pass) < 8) {
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Password too short");
@@ -578,6 +604,75 @@ static esp_err_t handler_api_ota(httpd_req_t *req)
 }
 
 // ─────────────────────────────────────────────
+//  Handler: POST /api/heat
+//  Activates or cancels the virtual heating button.
+//  Body: { "active": true,  "mode": "coffee"|"boiling" }
+//        { "active": false }
+// ─────────────────────────────────────────────
+
+static esp_err_t handler_api_heat(httpd_req_t *req)
+{
+    int total = req->content_len;
+    if (total <= 0 || total >= (int)sizeof(s_scratch)) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Body too large");
+        return ESP_FAIL;
+    }
+
+    xSemaphoreTake(s_scratch_mutex, portMAX_DELAY);
+    int received = httpd_req_recv(req, s_scratch, total);
+    if (received <= 0) {
+        xSemaphoreGive(s_scratch_mutex);
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Recv error");
+        return ESP_FAIL;
+    }
+    s_scratch[received] = '\0';
+
+    // Parse "active" — JSON boolean (true/false), not a quoted string
+    bool active = false;
+    const char *active_pos = strstr(s_scratch, "\"active\"");
+    if (active_pos) {
+        active_pos += strlen("\"active\"");
+        while (*active_pos == ' ' || *active_pos == ':') active_pos++;
+        active = (strncmp(active_pos, "true", 4) == 0);
+    }
+
+    // Parse "mode"
+    char mode_str[16] = {0};
+    json_get_string(s_scratch, "mode", mode_str, sizeof(mode_str));
+
+    xSemaphoreGive(s_scratch_mutex);
+
+    if (!active) {
+        g_heat_override.active = false;
+        ESP_LOGI(TAG, "Heat override cancelled via API");
+        httpd_resp_set_type(req, "application/json");
+        httpd_resp_sendstr(req, "{\"ok\":true}");
+        return ESP_OK;
+    }
+
+    // Determine target temperature from current config
+    heat_mode_t mode;
+    float target;
+    if (strcmp(mode_str, "boiling") == 0) {
+        mode   = HEAT_MODE_BOILING;
+        target = g_ws_config.boiling_setpoint;
+    } else {
+        mode   = HEAT_MODE_COFFEE;
+        target = g_ws_config.coffee_setpoint;
+    }
+
+    g_heat_override.target_temp = target;
+    g_heat_override.mode        = mode;
+    g_heat_override.active      = true;   // set last — main.c reads this flag
+
+    ESP_LOGI(TAG, "Heat override active — mode:%s target:%.1f°C", mode_str, target);
+
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_sendstr(req, "{\"ok\":true}");
+    return ESP_OK;
+}
+
+// ─────────────────────────────────────────────
 //  URI table
 // ─────────────────────────────────────────────
 
@@ -588,6 +683,7 @@ static const httpd_uri_t s_uris[] = {
     { .uri = "/api/history",     .method = HTTP_GET,  .handler = handler_api_history       },
     { .uri = "/api/config",      .method = HTTP_GET,  .handler = handler_api_config_get    },
     { .uri = "/api/config",      .method = HTTP_POST, .handler = handler_api_config        },
+    { .uri = "/api/heat",        .method = HTTP_POST, .handler = handler_api_heat          },
     { .uri = "/api/wifi",        .method = HTTP_POST, .handler = handler_api_wifi          },
     { .uri = "/api/ota",         .method = HTTP_POST, .handler = handler_api_ota           },
 };
@@ -644,11 +740,25 @@ void webserver_config_load_nvs(void)
 
 httpd_handle_t webserver_start(void)
 {
+    // Idempotent: if already running, return the existing handle
+    if (s_server) {
+        ESP_LOGW(TAG, "webserver_start() called but server already running — skipping");
+        return s_server;
+    }
+
     // Create mutex and allocate history JSON buffer once
     if (!s_history_mutex) {
         s_history_mutex = xSemaphoreCreateMutex();
         if (!s_history_mutex) {
             ESP_LOGE(TAG, "Failed to create history mutex");
+            return NULL;
+        }
+    }
+
+    if (!s_scratch_mutex) {
+        s_scratch_mutex = xSemaphoreCreateMutex();
+        if (!s_scratch_mutex) {
+            ESP_LOGE(TAG, "Failed to create scratch mutex");
             return NULL;
         }
     }
@@ -668,24 +778,25 @@ httpd_handle_t webserver_start(void)
     config.recv_wait_timeout  = 30;     // seconds — important for large OTA uploads
     config.send_wait_timeout  = 30;
 
-    httpd_handle_t server = NULL;
-    if (httpd_start(&server, &config) != ESP_OK) {
+    if (httpd_start(&s_server, &config) != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start HTTP server");
+        s_server = NULL;
         return NULL;
     }
 
     for (size_t i = 0; i < URI_COUNT; i++) {
-        httpd_register_uri_handler(server, &s_uris[i]);
+        httpd_register_uri_handler(s_server, &s_uris[i]);
     }
 
     ESP_LOGI(TAG, "HTTP server started — %d routes registered", (int)URI_COUNT);
-    return server;
+    return s_server;
 }
 
 void webserver_stop(httpd_handle_t server)
 {
     if (server) {
         httpd_stop(server);
+        s_server = NULL;
         ESP_LOGI(TAG, "HTTP server stopped");
     }
 }

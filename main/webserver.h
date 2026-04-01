@@ -65,6 +65,26 @@ typedef struct {
 extern webserver_status_t g_ws_status;
 
 // ─────────────────────────────────────────────
+//  Heat override (virtual button)
+//  Set by POST /api/heat, consumed by logic_control_task in main.c.
+//  The task is responsible for clearing it once target_temp is reached,
+//  so behaviour is correct even if the browser tab is closed.
+// ─────────────────────────────────────────────
+
+typedef enum {
+    HEAT_MODE_COFFEE  = 0,
+    HEAT_MODE_BOILING = 1,
+} heat_mode_t;
+
+typedef struct {
+    bool        active;       // true = override in effect
+    heat_mode_t mode;         // which setpoint to use
+    float       target_temp;  // °C — task clears override when temp >= this value
+} heat_override_t;
+
+extern heat_override_t g_heat_override;
+
+// ─────────────────────────────────────────────
 //  Pending WiFi credentials
 //  Set by POST /api/wifi, consumed by wifi_manager after reboot
 // ─────────────────────────────────────────────

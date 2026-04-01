@@ -368,6 +368,27 @@
     color: var(--text);
   }
 
+  .btn-heat {
+    color: var(--success);
+    border-color: var(--success);
+  }
+
+  .btn-heat:hover {
+    background: var(--success);
+    color: var(--bg);
+  }
+
+  .btn-heat.active {
+    background: var(--success);
+    color: var(--bg);
+    animation: heat-pulse 1.6s ease-in-out infinite;
+  }
+
+  @keyframes heat-pulse {
+    0%, 100% { opacity: 1; }
+    50%       { opacity: 0.65; }
+  }
+
   /* ── Forms ── */
   .form-group {
     display: flex;
@@ -771,6 +792,7 @@
       </div>
       <div class="sp-limits"><span>50°C</span><span>90°C</span></div>
       <div class="form-actions">
+        <button class="btn btn-heat" id="heatBtnCoffee" onclick="toggleHeat('coffee')">Aquecer</button>
         <button class="btn btn-primary" onclick="saveSetpoint('coffee')">Salvar</button>
       </div>
     </div>
@@ -784,33 +806,8 @@
       </div>
       <div class="sp-limits"><span>90°C</span><span>115°C</span></div>
       <div class="form-actions">
+        <button class="btn btn-heat" id="heatBtnBoiling" onclick="toggleHeat('boiling')">Aquecer</button>
         <button class="btn btn-primary" onclick="saveSetpoint('boiling')">Salvar</button>
-      </div>
-    </div>
-  </div>
-
-  <!-- ── WiFi Config ── -->
-  <div class="section-divider">Rede WiFi</div>
-
-  <div class="card">
-    <div class="card-header">
-      <div class="card-title">Credenciais</div>
-      <div class="status-badge online" id="wifiDetailStatus">Conectado</div>
-    </div>
-    <div class="card-body">
-      <div class="form-row" style="margin-bottom:16px">
-        <div class="form-group">
-          <label class="form-label">SSID</label>
-          <input class="form-input" type="text" id="wifiSsid" placeholder="Nome da rede">
-        </div>
-        <div class="form-group">
-          <label class="form-label">Senha</label>
-          <input class="form-input" type="password" id="wifiPass" placeholder="Mínimo 8 caracteres" minlength="8">
-        </div>
-      </div>
-      <div class="form-actions">
-        <button class="btn btn-secondary" onclick="clearWifiForm()">Limpar</button>
-        <button class="btn btn-primary" onclick="saveWifi()">Salvar e reiniciar</button>
       </div>
     </div>
   </div>
@@ -822,6 +819,30 @@
   </button>
 
   <div class="maint-body" id="maintBody">
+
+    <!-- WiFi Config -->
+    <div class="card">
+      <div class="card-header">
+        <div class="card-title">Rede WiFi</div>
+        <div class="status-badge online" id="wifiDetailStatus">Conectado</div>
+      </div>
+      <div class="card-body">
+        <div class="form-row" style="margin-bottom:16px">
+          <div class="form-group">
+            <label class="form-label">SSID</label>
+            <input class="form-input" type="text" id="wifiSsid" placeholder="Nome da rede">
+          </div>
+          <div class="form-group">
+            <label class="form-label">Senha</label>
+            <input class="form-input" type="password" id="wifiPass" placeholder="Mínimo 8 caracteres" minlength="8">
+          </div>
+        </div>
+        <div class="form-actions">
+          <button class="btn btn-secondary" onclick="clearWifiForm()">Limpar</button>
+          <button class="btn btn-primary" onclick="saveWifi()">Salvar e reiniciar</button>
+        </div>
+      </div>
+    </div>
 
     <!-- PID Constants -->
     <div class="card">
@@ -1082,6 +1103,8 @@ function applyStatus(s) {
   document.getElementById('sysRssi').textContent = s.rssi ? s.rssi + ' dBm' : '--';
   document.getElementById('otaVersionBadge').textContent = s.fw || '--';
 
+  checkHeatOverrideReached(s.temp);
+
   const badge = document.getElementById('wifiStatus');
   if (s.wifi_mode === 'STA') {
     badge.className   = 'status-badge online';
@@ -1187,6 +1210,81 @@ async function loadConfig() {
 }
 
 loadConfig();
+
+// ── Heat override (substituto do botão físico) ───────────
+let heatOverride   = null;   // 'coffee' | 'boiling' | null
+let heatTargetTemp = null;   // °C — copiado do slider no momento da ativação
+let heatStableCount = 0;     // polls aguardados após ativação antes de monitorar
+
+async function toggleHeat(which) {
+  if (heatOverride === which) {
+    // Cancela override
+    try {
+      await fetch('/api/heat', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ active: false })
+      });
+    } catch { /* ignora — firmware para quando temp atingir o alvo */ }
+    heatOverride    = null;
+    heatTargetTemp  = null;
+    heatStableCount = 0;
+    updateHeatButtons(null);
+    toast('Aquecimento manual cancelado');
+    return;
+  }
+
+  // Ativa override
+  const val = parseFloat(document.getElementById(which + 'Slider').value);
+  try {
+    const r = await fetch('/api/heat', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ active: true, mode: which })
+    });
+    if (!r.ok) { toast('Erro ao ativar aquecimento', 'error'); return; }
+  } catch { toast('Erro de conexão', 'error'); return; }
+
+  heatOverride    = which;
+  heatTargetTemp  = val;
+  heatStableCount = 0;     // começa a contar polls antes de monitorar
+  updateHeatButtons(which);
+  toast('Aquecendo até ' + val.toFixed(0) + '°C', 'success');
+}
+
+function updateHeatButtons(activeWhich) {
+  ['coffee', 'boiling'].forEach(w => {
+    const btn = document.getElementById('heatBtn' + w.charAt(0).toUpperCase() + w.slice(1));
+    if (!btn) return;
+    if (w === activeWhich) {
+      btn.classList.add('active');
+      btn.textContent = 'Aquecendo…';
+    } else {
+      btn.classList.remove('active');
+      btn.textContent = 'Aquecer';
+    }
+  });
+}
+
+// Detecta quando o firmware zerou o override (temperatura atingida).
+// Aguarda 5 polls (~5s) após ativação antes de começar a monitorar,
+// para dar tempo ao firmware processar e ao TRIAC começar a disparar.
+// Usa s.temp comparado com heatTargetTemp — não depende de s.heating,
+// que pode ser false por dead-band mesmo com override ainda ativo.
+function checkHeatOverrideReached(currentTemp) {
+  if (!heatOverride || heatTargetTemp === null) return;
+
+  heatStableCount++;
+  if (heatStableCount < 5) return;  // janela de estabilização
+
+  if (currentTemp >= heatTargetTemp) {
+    toast('Temperatura atingida — aquecimento encerrado', 'success');
+    heatOverride    = null;
+    heatTargetTemp  = null;
+    heatStableCount = 0;
+    updateHeatButtons(null);
+  }
+}
 
 // ── Setpoint sliders ──────────────────────────────────────
 function updateSlider(which, val) {
