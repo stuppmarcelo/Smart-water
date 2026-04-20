@@ -1,212 +1,233 @@
 # Smart Water
 
-Firmware para controle de temperatura de uma chaleira elétrica baseado em ESP32. Utiliza controle PID com disparo por fase (phase-cut) via TRIAC, sensor NTC para leitura de temperatura e interface web embarcada para monitoramento e configuração em tempo real.
+ESP32-based firmware for precise electric kettle temperature control. Uses PID with TRIAC phase-cut power regulation, NTC thermistor sensing, and an embedded web interface for real-time monitoring and configuration.
+
+---
+
+## Features
+
+- PID temperature control with TRIAC phase-cut (0–100% power resolution)
+- Exponential low-pass filter on ADC readings for stable thermal sensing
+- Embedded web interface (SPA) served from SPIFFS — no cloud dependency
+- Real-time temperature chart (5-minute rolling window, 300 data points)
+- Configurable setpoints: Coffee/Tea (50–90 °C) and Boiling (90–115 °C)
+- Auto-hibernate via deep sleep after configurable idle timeout
+- Over-the-air (OTA) firmware updates via drag-and-drop in the web UI
+- Wi-Fi provisioning with AP fallback and mDNS (`smartwater.local`)
+- All settings persisted in NVS (setpoints, PID constants, Wi-Fi credentials, timeout)
 
 ---
 
 ## Hardware
 
-| Componente | Detalhe |
+| Component | Details |
 |---|---|
-| Microcontrolador | ESP32 (4MB flash) |
-| Sensor de temperatura | NTC 10kΩ (divisor resistivo, GPIO34 / ADC1_CH6) |
-| Controle de potência | TRIAC com disparo por fase (phase-cut) |
-| Detecção de zero-crossing | Optoacoplador → GPIO18 (interrupção POSEDGE) |
-| Saída de disparo TRIAC | GPIO19 (gate via optoacoplador) |
-| Botão físico | GPIO21 (pull-up interno) |
-| Proteção de segurança | Termostato mecânico externo + watchdog de software |
+| Microcontroller | ESP32 (4 MB flash) |
+| Temperature sensor | NTC 10 kΩ — resistor divider, GPIO34 / ADC1_CH6 |
+| Power control | TRIAC with phase-cut firing |
+| Zero-crossing detection | Optocoupler → GPIO18 (POSEDGE interrupt) |
+| TRIAC gate output | GPIO19 (via optocoupler) |
+| Physical button | GPIO21 (internal pull-up) |
+| Safety | External mechanical thermostat + software watchdog |
 
-O circuito de potência é completamente isolado do microcontrolador por optoacopladores tanto no zero-crossing quanto no disparo do gate do TRIAC.
-
----
-
-## Funcionamento
-
-### Controle de temperatura
-
-A temperatura é lida a cada 50ms pelo ADC com calibração de curva de linha. O valor passa por um filtro passa-baixa exponencial (`α = 0.01`) antes de alimentar o PID. O coeficiente baixo do filtro garante estabilidade mas implica resposta lenta a mudanças bruscas — adequado para o perfil térmico de uma chaleira.
-
-O controle PID calcula a saída (0–255) a cada 250ms. Esse valor determina o ângulo de fase no qual o TRIAC é disparado dentro do semiciclo de 60Hz (~8333µs). O cálculo de delay é feito com aritmética inteira com multiplicação antes da divisão para evitar perda de precisão:
-
-```
-delay_us = cycleTime * (255 - PID) / 255
-```
-
-Um guard descarta o ciclo se o momento de disparo já passou (`delay_us ≤ 0`) ou se o valor calculado excede um semiciclo (`delay_us > 8500µs`), prevenindo comportamento indefinido.
-
-### Botão físico
-
-- **Pressionar e segurar**: ativa o aquecimento com o setpoint de Café/Chá
-- **Pressão curta + soltar**: troca para o setpoint de Fervura
-- **Soltar**: desativa o aquecimento
-
-O tempo de pressão é contado em ticks de 10ms pela `aux_task`.
-
-### Hibernação automática
-
-Após um tempo configurável (padrão: 5 minutos), o sistema desliga a saída de potência, sinaliza erro de aquecimento para parar o controle de fase, aguarda 1 segundo para o webserver servir um último status e entra em deep sleep. O timeout é configurável pela interface web e persistido na NVS.
+The power circuit is fully isolated from the microcontroller via optocouplers on both the zero-crossing detection and TRIAC gate paths.
 
 ---
 
-## Arquitetura do firmware
+## How It Works
 
-Desenvolvido com ESP-IDF v5.1. Compilado com CMake.
+### Temperature Control
 
-### Tarefas FreeRTOS
+The ADC is sampled every 50 ms with linear curve calibration. Readings pass through an exponential low-pass filter (`α = 0.01`) before feeding the PID controller. The low coefficient ensures stability at the cost of slow response to abrupt changes — appropriate for the thermal profile of a kettle.
 
-| Task | Core | Prioridade | Stack | Função |
+The PID runs every 250 ms and produces an output in the range 0–255. This value maps to a firing delay within the 60 Hz half-cycle (~8333 µs):
+
+```c
+delay_us = cycleTime * (255 - PID_output) / 255
+```
+
+A guard discards the cycle if the firing moment has already passed (`delay_us ≤ 0`) or exceeds the half-cycle duration (`delay_us > 8500 µs`), preventing undefined behavior.
+
+### Physical Button
+
+| Action | Behavior |
+|---|---|
+| Press and hold | Activates heating at Coffee/Tea setpoint |
+| Short press + release | Switches to Boiling setpoint |
+| Release | Deactivates heating |
+
+Press duration is counted in 10 ms ticks by `aux_task`.
+
+### Auto-Hibernate
+
+After a configurable idle timeout (default: 5 minutes), the firmware cuts power output, signals a heating error to stop phase control, waits 1 second for the web server to serve a final status response, then enters deep sleep. The timeout is configurable via the web interface and persisted in NVS.
+
+---
+
+## Firmware Architecture
+
+Built with **ESP-IDF v5.1**, compiled with CMake.
+
+### FreeRTOS Tasks
+
+| Task | Core | Priority | Stack | Role |
 |---|---|---|---|---|
-| `power_control` | 0 | 5 | 4096 | Aguarda notificação do ISR, calcula delay de fase, agenda disparo do TRIAC via `esp_timer` |
-| `temperature` | 0 | 5 | 4096 | Leitura ADC → cálculo NTC → filtro → atualiza `waterTemp` |
-| `logic_control` | 0 | 3 | 4096 | Debounce do botão, seleção de setpoint, cálculo PID |
-| `aux` | 1 | 1 | 4096 | Contador do botão, watchdog de hibernação |
-| `telemetry` | 0 | 2 | 3072 | Amostra estado a cada 1s e alimenta buffer de histórico do webserver |
+| `power_control` | 0 | 5 | 4096 B | Waits for ISR notification, calculates phase delay, schedules TRIAC gate via `esp_timer` |
+| `temperature` | 0 | 5 | 4096 B | ADC read → NTC calculation → filter → updates `waterTemp` |
+| `logic_control` | 0 | 3 | 4096 B | Button debounce, setpoint selection, PID calculation |
+| `aux` | 1 | 1 | 4096 B | Button press counter, hibernate watchdog |
+| `telemetry` | 0 | 2 | 3072 B | Samples system state every 1 s and feeds the web server history buffer |
 
-A ISR de zero-crossing só é habilitada após `power_control_task` atribuir seu próprio handle (`powerTaskHandle`), evitando notificação para handle nulo durante o boot.
+> The zero-crossing ISR is enabled only after `power_control_task` assigns its own handle to `powerTaskHandle`, preventing notifications to a null handle during boot.
 
-### Módulos
+### Module Layout
 
 ```
 main/
-├── main.c              — Tasks de controle, ISR, GPIO, ADC, app_main
-├── wifi_manager.c/h    — STA com fallback para AP, mDNS (smartwater.local)
-├── webserver.c/h       — HTTP server, rotas REST, buffer de histórico, OTA
+├── main.c              — Control tasks, ISR, GPIO, ADC, app_main
+├── wifi_manager.c/h    — STA with AP fallback, mDNS (smartwater.local)
+├── webserver.c/h       — HTTP server, REST routes, history ring buffer, OTA
 └── CMakeLists.txt
 
-spiffs_data/
-├── index.html          — Interface web (SPA)
-└── chart.umd.min.js    — Chart.js 4.4.1 (local, sem dependência de CDN)
+spiffs/
+├── index.html          — Web interface (SPA)
+└── chart.umd.min.js    — Chart.js 4.4.1 (local, no CDN dependency)
 
-partitions.csv          — Tabela customizada com duas partições OTA + SPIFFS
+partitions.csv          — Custom partition table: dual OTA + SPIFFS
 ```
 
-### Tabela de partições (4MB)
+### Partition Table (4 MB)
 
-| Nome | Tipo | Offset | Tamanho |
+| Name | Type | Offset | Size |
 |---|---|---|---|
-| nvs | data/nvs | 0x9000 | 24KB |
-| otadata | data/ota | 0xF000 | 8KB |
-| app0 (ota_0) | app/ota_0 | 0x20000 | 1.5MB |
-| app1 (ota_1) | app/ota_1 | 0x1A0000 | 1.5MB |
-| spiffs | data/spiffs | 0x320000 | 896KB |
+| nvs | data/nvs | 0x9000 | 24 KB |
+| otadata | data/ota | 0xF000 | 8 KB |
+| app0 (ota_0) | app/ota_0 | 0x20000 | 1.5 MB |
+| app1 (ota_1) | app/ota_1 | 0x1A0000 | 1.5 MB |
+| spiffs | data/spiffs | 0x320000 | 896 KB |
 
 ---
 
-## Interface web
+## Web Interface
 
-Acessível por `http://smartwater.local` no modo STA ou `http://192.168.4.1` no modo AP.
+Accessible at `http://smartwater.local` in STA mode or `http://192.168.4.1` in AP mode.
 
-### Funcionalidades
+### Capabilities
 
-- Gráfico de temperatura em tempo real (janela de 5 minutos, 300 pontos)
-- Histórico restaurado ao recarregar a página via `GET /api/history`
-- Setpoints configuráveis: Café/Chá (50–90°C) e Fervura (90–115°C)
-- Barra de saída PID em tempo real
-- Contador de hibernação no header com alerta visual abaixo de 2 minutos
-- Configuração de rede WiFi com reboot automático
-- Painel de manutenção recolhível com:
-  - Constantes PID (Kp, Ki, Kd) com confirmação modal antes de aplicar
-  - Timeout de hibernação (1–120 minutos)
-  - Upload de firmware OTA (arrastar e soltar `.bin`)
-  - Informações do sistema (IP, heap livre, RSSI, versão do firmware)
+- Real-time temperature chart (5-minute window, 300 points)
+- History restored on page reload via `GET /api/history`
+- Adjustable setpoints: Coffee/Tea (50–90 °C) and Boiling (90–115 °C)
+- Live PID output bar
+- Hibernate countdown in the header with visual alert under 2 minutes
+- Wi-Fi configuration with automatic reboot
+- Collapsible maintenance panel:
+  - PID constants (Kp, Ki, Kd) with modal confirmation before applying
+  - Hibernate timeout (1–120 minutes)
+  - OTA firmware upload (drag-and-drop `.bin`)
+  - System information (IP address, free heap, RSSI, firmware version)
 
-### API REST
+### REST API
 
-| Método | Rota | Descrição |
+| Method | Route | Description |
 |---|---|---|
-| GET | `/` | Serve `index.html` do SPIFFS |
-| GET | `/chart.umd.min.js` | Serve Chart.js do SPIFFS (cache 1 dia) |
-| GET | `/api/status` | JSON com estado atual do sistema |
-| GET | `/api/history` | JSON com buffer circular de temperatura |
-| GET | `/api/config` | JSON com configurações atuais |
-| POST | `/api/config` | Atualiza setpoints, PID e/ou timeout de hibernação |
-| POST | `/api/wifi` | Salva credenciais WiFi na NVS e reinicia |
-| POST | `/api/ota` | Recebe `.bin` como `application/octet-stream` e grava via OTA |
+| GET | `/` | Serves `index.html` from SPIFFS |
+| GET | `/chart.umd.min.js` | Serves Chart.js from SPIFFS (1-day cache) |
+| GET | `/api/status` | JSON with current system state |
+| GET | `/api/history` | JSON with temperature ring buffer |
+| GET | `/api/config` | JSON with current configuration |
+| POST | `/api/config` | Updates setpoints, PID constants, and/or hibernate timeout |
+| POST | `/api/wifi` | Saves Wi-Fi credentials to NVS and reboots |
+| POST | `/api/ota` | Receives `.bin` as `application/octet-stream` and writes via OTA |
 
 ---
 
-## WiFi
+## Wi-Fi
 
-O `wifi_manager` tenta conectar às credenciais salvas na NVS ao boot. Se não houver credenciais ou a conexão falhar após 5 tentativas (timeout total de 15s), sobe um Access Point aberto com SSID `SmartWater-Setup`. Em ambos os modos o webserver está disponível com a mesma interface.
+On boot, `wifi_manager` attempts to connect using credentials stored in NVS. If no credentials exist or the connection fails after 5 attempts (15 s total timeout), it starts an open Access Point with SSID `SmartWater-Setup`. The web server is available in both modes with the same interface.
 
-No modo STA, o mDNS anuncia `smartwater.local` na rede local, eliminando a necessidade de conhecer o IP dinâmico.
-
----
-
-## OTA
-
-O firmware suporta atualização over-the-air via upload de `.bin` pela interface web. O arquivo é enviado como binário puro (`Content-Type: application/octet-stream`) e gravado em chunks de 1KB na partição OTA inativa. Após gravação bem-sucedida, o ESP reinicia na nova partição.
-
-O rollback automático do ESP-IDF está ativo. `esp_ota_mark_app_valid_cancel_rollback()` é chamado no `app_main` logo após as tasks de controle subirem, antes do WiFi. Se o firmware travar antes dessa chamada, o ESP-IDF reverte automaticamente para a partição anterior no próximo boot.
-
-A partição SPIFFS (interface web) **não** é atualizada via OTA — apenas o firmware. Para atualizar o HTML:
-
-```bash
-idf.py spiffs-flash
-```
+In STA mode, mDNS announces `smartwater.local` on the local network, eliminating the need to know the dynamic IP.
 
 ---
 
-## Build e flash
+## OTA Updates
 
-### Pré-requisitos
+Firmware can be updated over-the-air by uploading a `.bin` file through the web interface. The binary is sent as raw bytes (`Content-Type: application/octet-stream`) and written in 1 KB chunks to the inactive OTA partition. The device reboots into the new partition after a successful write.
+
+ESP-IDF automatic rollback is active. `esp_ota_mark_app_valid_cancel_rollback()` is called in `app_main` after the control tasks are running but before Wi-Fi initializes. If the firmware hangs before that call, ESP-IDF automatically reverts to the previous partition on the next boot.
+
+> **Note:** The SPIFFS partition (web interface) is **not** updated via OTA. To update the HTML:
+> ```bash
+> idf.py spiffs-flash
+> ```
+
+---
+
+## Build & Flash
+
+### Prerequisites
 
 - ESP-IDF v5.1
 - Python 3.9+
 
-### Compilar e gravar (primeira vez)
+### First-time flash
 
 ```bash
 idf.py set-target esp32
-idf.py menuconfig   # confirmar: tabela customizada, offset 0x8000
-idf.py erase-flash
+idf.py menuconfig   # confirm: custom partition table, offset 0x8000
+idf.py erase-flash  # required when changing partition table — clears NVS
 idf.py flash monitor
 ```
 
-O `erase-flash` é obrigatório ao trocar a tabela de partições. Apaga NVS — as credenciais WiFi precisarão ser reconfiguradas pela interface web.
+> After `erase-flash`, Wi-Fi credentials are cleared and must be reconfigured via the web interface.
 
-### Atualização posterior
-
-Via OTA pela interface web (firmware) ou:
+### Subsequent updates
 
 ```bash
-idf.py flash          # firmware
-idf.py spiffs-flash   # interface web
+idf.py flash          # firmware only
+idf.py spiffs-flash   # web interface only
 ```
 
-### Definir versão do firmware
+Or use the OTA upload in the web UI for firmware updates.
 
-No `CMakeLists.txt` raiz:
+### Setting the firmware version
+
+In the root `CMakeLists.txt`:
 
 ```cmake
 set(PROJECT_VER "1.0.0")
 ```
 
-A versão aparece na interface web em Informações do Sistema.
+The version is displayed in the web interface under System Information.
 
 ---
 
-## Configurações persistidas na NVS
+## NVS Persistent Storage
 
-| Namespace | Chave | Tipo | Descrição |
+| Namespace | Key | Type | Description |
 |---|---|---|---|
-| `sw_wifi` | `ssid` | string | SSID da rede WiFi |
-| `sw_wifi` | `password` | string | Senha da rede WiFi |
-| `sw_config` | `coffee_sp` | u32 | Setpoint café × 100 |
-| `sw_config` | `boiling_sp` | u32 | Setpoint fervura × 100 |
+| `sw_wifi` | `ssid` | string | Wi-Fi SSID |
+| `sw_wifi` | `password` | string | Wi-Fi password |
+| `sw_config` | `coffee_sp` | u32 | Coffee/Tea setpoint × 100 |
+| `sw_config` | `boiling_sp` | u32 | Boiling setpoint × 100 |
 | `sw_config` | `kp` | u32 | Kp × 1000 |
-| `sw_config` | `ki` | u32 | Ki × 10000000 |
+| `sw_config` | `ki` | u32 | Ki × 10,000,000 |
 | `sw_config` | `kd` | u32 | Kd × 1000 |
-| `sw_config` | `hibernate_ms` | u32 | Timeout de hibernação em ms |
+| `sw_config` | `hibernate_ms` | u32 | Hibernate timeout in ms |
 
 ---
 
-## Segurança
+## Safety
 
-- Circuito de potência isolado por optoacopladores
-- Termostato mecânico externo inibe operação em caso de superaquecimento
-- Watchdog de software por task (`esp_task_wdt`) em todas as tasks críticas
-- Limite de temperatura por software: desliga em > 120°C
-- Timeout de operação configurável com hibernação automática por deep sleep
-- Validação de range em todos os campos do `POST /api/config` antes de aplicar
-- Confirmação modal na interface antes de aplicar novas constantes PID
+- Power circuit isolated from MCU via optocouplers (zero-crossing and TRIAC gate)
+- External mechanical thermostat prevents operation in case of overheating
+- Software task watchdog (`esp_task_wdt`) on all critical tasks
+- Software temperature limit: output cut above 120 °C
+- Configurable operation timeout with automatic deep sleep
+- Range validation on all `POST /api/config` fields before applying
+- Modal confirmation in the web UI before applying new PID constants
+
+---
+
+## License
+
+Licensed under the MIT License. See LICENSE for details.
