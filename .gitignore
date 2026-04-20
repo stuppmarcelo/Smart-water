@@ -3,5 +3,6 @@
 /.vscode
 *.log
 *.old
+settings.json
 *.DS_Store
 **/*.tmp
