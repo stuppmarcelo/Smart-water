@@ -15,6 +15,7 @@
 #include "esp_ota_ops.h"
 #include "esp_http_server.h"
 #include "esp_vfs.h"
+#include "wifi_manager.h"
 
 #include "nvs.h"
 #include "nvs_flash.h"
@@ -488,13 +489,7 @@ static esp_err_t handler_api_wifi(httpd_req_t *req)
     }
 
     // Save to NVS
-    nvs_handle_t nvs;
-    if (nvs_open("wifi_cfg", NVS_READWRITE, &nvs) == ESP_OK) {
-        nvs_set_str(nvs, "ssid",     ssid);
-        nvs_set_str(nvs, "password", pass);
-        nvs_commit(nvs);
-        nvs_close(nvs);
-    }
+    wifi_manager_save_credentials(ssid, pass);
 
     // Signal wifi_manager to reconnect after response is sent
     strncpy(g_wifi_pending.ssid,     ssid, sizeof(g_wifi_pending.ssid));
