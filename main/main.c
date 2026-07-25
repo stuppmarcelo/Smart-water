@@ -248,9 +248,9 @@ void logic_control_task(void *arg)
 
         // --- Button debounce ---
         if (timerBtn < MAX_TIMER_BTN_ON) {
-            if (!gpio_get_level(IN_BTN)) {
+            if (gpio_get_level(IN_BTN)) {
                 vTaskDelay(pdMS_TO_TICKS(1));
-                commandBtn = !gpio_get_level(IN_BTN);
+                commandBtn = gpio_get_level(IN_BTN);
             } else {
                 commandBtn = false;
                 i = 0.0f;
